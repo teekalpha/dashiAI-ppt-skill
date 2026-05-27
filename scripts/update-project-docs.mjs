@@ -6,11 +6,6 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 
 const descriptions = {
   '.githooks/pre-commit': '本地 Git pre-commit hook,提交前重生成 README、ADR 和文件作用说明并自动 stage。',
-  '.github/ISSUE_TEMPLATE/bug_report.yml': 'GitHub bug report issue 模板。',
-  '.github/ISSUE_TEMPLATE/config.yml': 'GitHub issue template 配置。',
-  '.github/ISSUE_TEMPLATE/feature_request.yml': 'GitHub feature request issue 模板。',
-  '.github/ISSUE_TEMPLATE/question.yml': 'GitHub question issue 模板。',
-  '.github/pull_request_template.md': 'GitHub pull request 描述模板。',
   '.gitignore': '忽略本地依赖、生成产物和系统临时文件。',
   'README.md': '项目入口说明,包含快速开始、当前选项和文档索引。',
   'SKILL.md': '给 Agent 使用的 skill 说明,定义 PPT 生成流程和约束。',
@@ -46,6 +41,7 @@ const files = [...new Set([
   ...generatedFiles,
 ])]
   .filter((file) => file !== '.DS_Store')
+  .filter((file) => fs.existsSync(path.join(ROOT, file)))
   .sort();
 
 writeFile('docs/project-files.md', renderProjectFiles(files));
@@ -124,7 +120,6 @@ function replaceSection(content, name, body) {
 
 function describe(file) {
   if (descriptions[file]) return descriptions[file];
-  if (file.startsWith('.github/')) return 'GitHub 协作模板或仓库配置。';
   if (file.startsWith('assets/')) return '静态模板或浏览器运行时资源。';
   if (file.startsWith('docs/')) return '项目文档。';
   if (file.startsWith('examples/component-decks/')) return '组件化 deck 示例配置。';
