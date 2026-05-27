@@ -113,5 +113,5 @@ npm run validate:swiss -- output/examples/retail-launch-brief/ppt/index.html
 以下文档由 `npm run docs:update` 同步,提交前也会由 `.githooks/pre-commit` 自动更新。
 
 - [ADR](docs/ADR.md): 当前架构决策记录
-- [项目文件作用说明](docs/project-files.md): 当前 29 个源码文件的主要作用
+- [项目文件作用说明](docs/project-files.md): 当前 30 个源码文件的主要作用
 <!-- project-docs:end -->

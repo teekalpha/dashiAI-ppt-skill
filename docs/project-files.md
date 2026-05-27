@@ -39,6 +39,7 @@
 |   |-- options.jsx - 选项注册表,集中登记主题色、字体组合和页面版式。
 |   `-- renderDeck.jsx - 核心渲染器,把 React slides 注入模板并替换主题/字体变量。
 |-- .gitignore - 忽略本地依赖、生成产物和系统临时文件。
+|-- AGENTS.md - 项目级 Agent 记忆,记录本仓库长期遵守的实现约束。
 |-- package-lock.json - npm 依赖锁定文件。
 |-- package.json - npm 脚本和 React/tsx 依赖声明。
 |-- README.md - 项目入口说明,包含快速开始、当前选项和文档索引。

@@ -7,6 +7,7 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 const descriptions = {
   '.githooks/pre-commit': '本地 Git pre-commit hook,提交前重生成 README、ADR 和文件作用说明并自动 stage。',
   '.gitignore': '忽略本地依赖、生成产物和系统临时文件。',
+  'AGENTS.md': '项目级 Agent 记忆,记录本仓库长期遵守的实现约束。',
   'README.md': '项目入口说明,包含快速开始、当前选项和文档索引。',
   'SKILL.md': '给 Agent 使用的 skill 说明,定义 PPT 生成流程和约束。',
   'assets/motion.min.js': '浏览器端 Motion One 动效 runtime,由渲染器复制到最终产物。',
