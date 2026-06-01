@@ -3401,6 +3401,7 @@ export const SHOWCASE_DEV_ADJUSTMENTS = {
       backgroundColorToken: "--inverse-bg",
       scope: "theme",
       theme: "dark",
+      colorToken: "--theme-st2-track-border",
     },
     "text:style2_02:3": {
       id: "text:style2_02:3",
@@ -3411,9 +3412,9 @@ export const SHOWCASE_DEV_ADJUSTMENTS = {
       html: "片单统计调性<em>片单统计</em>P8<br>片单统计素材<span>负责人</span>调性<br><span>素材</span>",
       text: "片单统计调性片单统计P8 片单统计素材负责人调性 素材",
       fontSizeToken: "--fs-h2",
-      colorToken: "--theme-st2-body-on-paper",
+      colorToken: "--theme-st1-shader-ink",
       scope: "theme",
-      theme: "light",
+      theme: "dark",
     },
     "text:style2_03:9": {
       id: "text:style2_03:9",
