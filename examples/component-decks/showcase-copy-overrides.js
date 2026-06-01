@@ -3411,7 +3411,9 @@ export const SHOWCASE_DEV_ADJUSTMENTS = {
       html: "片单统计调性<em>片单统计</em>P8<br>片单统计素材<span>负责人</span>调性<br><span>素材</span>",
       text: "片单统计调性片单统计P8 片单统计素材负责人调性 素材",
       fontSizeToken: "--fs-h2",
-      colorToken: "--text-on-color",
+      colorToken: "--theme-st2-body-on-paper",
+      scope: "theme",
+      theme: "light",
     },
     "text:style2_03:9": {
       id: "text:style2_03:9",
