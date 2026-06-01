@@ -9,6 +9,11 @@ const cast = [
   ['05', 'star', 'purple', '紫闪', 'Starly', '#A87FFF'],
 ];
 
+const firstStageStyle = {
+  background: 'var(--st1-paper)',
+  '--st1-stage-muted': 'color-mix(in srgb, var(--st1-ink) 62%, transparent)',
+};
+
 export function Style1_05Cast() {
   return (
     <Style1Slide layout="ST1-05" tone="dark" className="st1-cast">
@@ -19,7 +24,7 @@ export function Style1_05Cast() {
       <div className="st1-lineup">
         {cast.map(([num, kind, color, cn, en, hex]) => (
           <div className="st1-cast-card" key={num}>
-            <div className="stage"><span>{num}</span><Mascot kind={kind} slotId={`st1-cast-${num}`} className={color} /></div>
+            <div className="stage" style={num === '01' ? firstStageStyle : undefined}><span>{num}</span><Mascot kind={kind} slotId={`st1-cast-${num}`} className={color} /></div>
             <div className="cn">{cn}</div><div className="en">{en}</div><div className="hex">{hex}</div>
           </div>
         ))}
