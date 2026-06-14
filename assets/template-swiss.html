@@ -2087,21 +2087,39 @@ go(Number.isFinite(initialSlide) ? initialSlide : 0, {animate:false});
   if(!deck) return;
   window.__deckExportLocked = false;
 
-  window.__exportDeckPdf = function(){
+  window.__exportDeckPdf = async function(){
     if(window.__deckExportLocked) return;
     const overview = document.getElementById('overview');
+    const restoreState = captureExportViewState();
+    let exportUi = null;
+    let restorePrintState = null;
     try {
+      exportUi = beginDeckExport('PDF');
+      updateDeckExport(exportUi, 0, 1, '准备页面状态...');
       window.__syncDeckPageNumbers?.();
       window.__flushEditableTextState?.();
       window.__syncDeckViewModelFromDom?.();
+      throwIfDeckExportCancelled(exportUi);
       document.body.classList.remove('preview-panel-open', 'overview-on');
       if(overview) overview.style.display = 'none';
       window.__layoutDeck?.();
       window.__restoreEffectIframes?.(document);
-      runBrowserPrint(window).finally(() => window.__syncActiveEffects?.());
+      const slides = await materializeExportSlides(exportUi, 'PDF');
+      throwIfDeckExportCancelled(exportUi);
+      restorePrintState = prepareSlidesForPrint(slides);
+      finishSlidesForExport(slides);
+      await nextFrame();
+      updateDeckExport(exportUi, slides.length, slides.length, '正在打开浏览器打印...');
+      await runBrowserPrint(window);
     } catch (error) {
+      if(isDeckExportCancelledError(error)) return;
       console.error('[export pdf]', error);
       alert('PDF 导出失败，请在浏览器控制台查看错误。');
+    } finally {
+      restorePrintState?.();
+      restoreExportViewState(restoreState);
+      endDeckExport(exportUi);
+      window.__syncActiveEffects?.();
     }
   };
 
@@ -2203,21 +2221,92 @@ go(Number.isFinite(initialSlide) ? initialSlide : 0, {animate:false});
     }
   };
 
-  window.__exportDeckHtml = function(){
+  window.__exportDeckHtml = async function(){
     if(window.__deckExportLocked) return;
+    let exportUi = null;
     try {
+      exportUi = beginDeckExport('HTML');
+      updateDeckExport(exportUi, 0, 1, '准备页面状态...');
       window.__syncDeckPageNumbers?.();
       window.__flushEditableTextState?.();
       window.__syncDeckViewModelFromDom?.();
+      throwIfDeckExportCancelled(exportUi);
+      const slides = await materializeExportSlides(exportUi, 'HTML');
+      throwIfDeckExportCancelled(exportUi);
+      updateDeckExport(exportUi, slides.length, slides.length, '正在生成 HTML...');
+      await nextFrame();
       const clone = document.documentElement.cloneNode(true);
       prepareSimpleHtmlExportClone(clone);
       const blob = new Blob(['<!DOCTYPE html>\n' + clone.outerHTML], {type: 'text/html;charset=utf-8'});
-      downloadBlob(blob, 'index.html');
+      throwIfDeckExportCancelled(exportUi);
+      updateDeckExport(exportUi, slides.length, slides.length, '正在下载 HTML...');
+      await downloadBlob(blob, 'index.html');
     } catch (error) {
+      if(isDeckExportCancelledError(error)) return;
       console.error('[export html]', error);
       alert('HTML 导出失败，请在浏览器控制台查看错误。');
+    } finally {
+      endDeckExport(exportUi);
+      window.__syncActiveEffects?.();
     }
   };
+
+  async function materializeExportSlides(exportUi, label){
+    const slides = window.__getVisibleSlides?.() || [...document.querySelectorAll('#deck > .slide:not([hidden])')];
+    for(let index = 0; index < slides.length; index++){
+      throwIfDeckExportCancelled(exportUi);
+      const slide = slides[index];
+      updateDeckExport(exportUi, index, slides.length, `${label} 准备第 ${index + 1} / ${slides.length} 页`);
+      window.__ensureRuntimeSlideRendered?.(slide);
+      if(index % 2 === 1) await nextFrame();
+    }
+    finishSlidesForExport(slides);
+    updateDeckExport(exportUi, slides.length, slides.length, `${label} 页面已准备完成`);
+    await nextFrame();
+    return slides;
+  }
+
+  function finishSlidesForExport(slides){
+    slides.forEach(slide => finishSlideCaptureMotion(slide));
+  }
+
+  function prepareSlidesForPrint(slides){
+    const states = slides.map(slide => ({
+      slide,
+      active: slide.classList.contains('active'),
+      deckActive: slide.hasAttribute('data-deck-active'),
+    }));
+    slides.forEach(slide => {
+      slide.classList.add('active');
+      slide.setAttribute('data-deck-active', '');
+    });
+    return () => states.forEach(({slide, active, deckActive}) => {
+      slide.classList.toggle('active', active);
+      if(deckActive) slide.setAttribute('data-deck-active', '');
+      else slide.removeAttribute('data-deck-active');
+    });
+  }
+
+  function captureExportViewState(){
+    const overview = document.getElementById('overview');
+    return {
+      index: window.__currentSlideIndex || 0,
+      panelOpen: document.body.classList.contains('preview-panel-open'),
+      overviewOn: document.body.classList.contains('overview-on'),
+      overviewDisplay: overview?.style.display || '',
+    };
+  }
+
+  function restoreExportViewState(state){
+    if(!state) return;
+    go(state.index, {animate:false, force:true});
+    document.body.classList.toggle('preview-panel-open', state.panelOpen);
+    document.body.classList.toggle('overview-on', state.overviewOn);
+    const overview = document.getElementById('overview');
+    if(overview) overview.style.display = state.overviewDisplay;
+    document.getElementById('preview-toggle')?.setAttribute('aria-expanded', state.panelOpen ? 'true' : 'false');
+    window.__layoutDeck?.();
+  }
 
   function prepareSimpleHtmlExportClone(clone){
     clone.querySelector('#overview')?.remove();
