@@ -182,6 +182,8 @@ async function collectEditableDeck(page, options = {}) {
         window.__restoreEffectIframes?.(slides[index]);
         window.__layoutDeck?.();
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        window.__finishEditablePptxAnimations?.(slides[index] || document);
+        await new Promise(resolve => requestAnimationFrame(resolve));
         await new Promise(resolve => setTimeout(resolve, 120));
       }, i);
       const slideData = await page.evaluate(index => window.__collectEditablePptxSlide(index), i + 1);
@@ -259,6 +261,8 @@ async function installBrowserCollector(page) {
           'position',
           'backgroundColor',
           'backgroundImage',
+          'backgroundClip',
+          'webkitBackgroundClip',
           'backgroundSize',
           'backgroundPosition',
           'borderTopWidth',
@@ -279,6 +283,8 @@ async function installBrowserCollector(page) {
           'borderBottomLeftRadius',
           'boxShadow',
           'color',
+          'fill',
+          'webkitTextFillColor',
           'fontFamily',
           'fontSize',
           'fontWeight',
@@ -305,8 +311,13 @@ async function installBrowserCollector(page) {
         ${summarizeNode.toString()}
         ${elementImageData.toString()}
         ${svgElementData.toString()}
+        ${collectSvgTextNodes.toString()}
         ${cloneSvgWithComputedStyle.toString()}
         ${backgroundUrl.toString()}
+        ${finishEditablePptxAnimations.toString()}
+        ${fallbackTextRisk.toString()}
+        ${visibleTextInSubtree.toString()}
+        ${svgTextRisk.toString()}
         ${fetchImageDataUrl.toString()}
         ${blobToDataUrl.toString()}
         ${isVisibleElement.toString()}
@@ -316,6 +327,7 @@ async function installBrowserCollector(page) {
         ${normalizeText.toString()}
         ${hasPaint.toString()}
         ${hasAnyBorder.toString()}
+        window.__finishEditablePptxAnimations = finishEditablePptxAnimations;
         return collectActiveSlide;
       })();
     `,
@@ -335,7 +347,7 @@ function renderCapturedNode(slide, node, slideRect, warnings, totals) {
   renderBox(slide, node, slideRect, warnings, totals);
   renderNodeImage(slide, node, slideRect, warnings, totals);
 
-  if (node.tag === 'img' || node.tag === 'svg' || node.tag === 'canvas') return;
+  if (node.tag === 'img' || node.tag === 'canvas') return;
   for (const child of node.children || []) renderCapturedNode(slide, child, slideRect, warnings, totals);
 }
 
@@ -343,7 +355,9 @@ function renderBox(slide, node, slideRect, warnings, totals) {
   const c = coords(node, slideRect);
   if (c.w < 0.003 || c.h < 0.003) return;
   const style = node.style || {};
-  const fill = parseCssColor(style.backgroundColor) || colorFromBackgroundImage(style.backgroundImage);
+  const fill = isTextClippedBackground(style)
+    ? parseCssColor(style.backgroundColor)
+    : parseCssColor(style.backgroundColor) || colorFromBackgroundImage(style.backgroundImage);
   const radius = Math.min(maxRadiusPx(style), 48) / slideRect.w * PPT_W;
   const borders = readBorders(style);
   const hasBorder = borders.some(border => border.width > 0 && border.color);
@@ -404,7 +418,7 @@ function renderText(slide, node, slideRect, warnings, totals) {
   const c = coords(node, slideRect);
   if (c.w < 0.01 || c.h < 0.01) return;
   const style = node.style || {};
-  const color = parseCssColor(style.color) || { color: '111111', alpha: 1 };
+  const color = textColorForStyle(style);
   const fontSizePx = Math.max(4, Math.min(140, parseFloat(style.fontSize || '16') || 16));
   const fontFace = firstFont(style.fontFamily);
   const weight = String(style.fontWeight || '');
@@ -526,6 +540,8 @@ async function captureElement(el, slideRect, warnings, depth, slideIndex) {
     node.exportId = exportId;
     node.elementScreenshot = true;
     node.imageKind = 'unicorn-background';
+    const risk = fallbackTextRisk(el, slideRect);
+    if (risk.count) warnings.push({ slide: slideIndex, type: 'node-image-fallback-text-risk', node: 'unicorn-background', textCount: risk.count, sample: risk.sample });
     warnings.push({ slide: slideIndex, type: 'node-image-fallback', node: 'unicorn-background', count: 1 });
     return node;
   }
@@ -547,10 +563,18 @@ async function captureElement(el, slideRect, warnings, depth, slideIndex) {
     return node;
   }
   if (tag === 'svg') {
-    node.imageData = await svgElementData(el, clipped.width, clipped.height);
+    const svgTexts = collectSvgTextNodes(el, slideRect, slideIndex);
+    node.imageData = await svgElementData(el, clipped.width, clipped.height, { stripText: svgTexts.length > 0 });
     node.imageKind = 'svg';
+    const risk = svgTextRisk(el);
+    if (risk.count && svgTexts.length) {
+      warnings.push({ slide: slideIndex, type: 'node-image-fallback-text-extracted', node: 'svg', textCount: svgTexts.length, sample: risk.sample });
+    } else if (risk.count) {
+      warnings.push({ slide: slideIndex, type: 'node-image-fallback-text-risk', node: 'svg', textCount: risk.count, sample: risk.sample });
+    }
     if (node.imageData) warnings.push({ slide: slideIndex, type: 'node-image-fallback', node: 'svg', count: 1 });
     else warnings.push({ slide: slideIndex, type: 'svg-skipped', reason: 'rasterize-failed' });
+    node.children.push(...svgTexts);
     return node;
   }
 
@@ -609,7 +633,12 @@ function captureTextNode(textNode, parent, slideRect, style, slideIndex) {
 function readStyle(el) {
   const cs = getComputedStyle(el);
   const style = {};
-  for (const key of STYLE_KEYS) style[key] = cs[key] || '';
+  for (const key of STYLE_KEYS) {
+    const cssKey = key.startsWith('webkit')
+      ? `-${key.replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)}`
+      : key.replace(/[A-Z]/g, match => `-${match.toLowerCase()}`);
+    style[key] = cs[key] || cs.getPropertyValue(cssKey) || '';
+  }
   return style;
 }
 
@@ -659,9 +688,10 @@ async function elementImageData(img, src) {
   return fetchImageDataUrl(src);
 }
 
-async function svgElementData(svg, width, height) {
+async function svgElementData(svg, width, height, options = {}) {
   try {
     const clone = cloneSvgWithComputedStyle(svg);
+    if (options.stripText) clone.querySelectorAll('text').forEach(el => el.remove());
     clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
     if (!clone.getAttribute('width')) clone.setAttribute('width', String(Math.max(1, Math.round(width))));
     if (!clone.getAttribute('height')) clone.setAttribute('height', String(Math.max(1, Math.round(height))));
@@ -687,6 +717,27 @@ async function svgElementData(svg, width, height) {
   } catch {
     return null;
   }
+}
+
+function collectSvgTextNodes(svg, slideRect, slideIndex) {
+  return [...svg.querySelectorAll('text')]
+    .map(el => {
+      const text = normalizeText(el.textContent || '');
+      if (!text) return null;
+      const clipped = clippedRect(el.getBoundingClientRect(), slideRect);
+      if (!clipped || clipped.width < 1 || clipped.height < 1) return null;
+      const style = readStyle(el);
+      return {
+        tag: '#text',
+        slideIndex,
+        rect: rectObject(clipped),
+        style,
+        text,
+        singleLine: !/[\r\n]/.test(text),
+        children: [],
+      };
+    })
+    .filter(Boolean);
 }
 
 function cloneSvgWithComputedStyle(svg) {
@@ -722,6 +773,58 @@ function backgroundUrl(backgroundImage) {
   } catch {
     return null;
   }
+}
+
+function finishEditablePptxAnimations(scope) {
+  const root = scope || document;
+  try {
+    for (const animation of document.getAnimations({ subtree: true })) {
+      const target = animation.effect?.target;
+      if (root !== document && target instanceof Node && !root.contains(target)) continue;
+      try {
+        animation.updatePlaybackRate?.(1);
+        animation.finish();
+      } catch {
+        try {
+          animation.currentTime = animation.effect?.getTiming?.().duration || 999999;
+          animation.pause();
+        } catch {}
+      }
+    }
+  } catch {}
+}
+
+function fallbackTextRisk(root, slideRect) {
+  const texts = visibleTextInSubtree(root, slideRect);
+  return { count: texts.length, sample: texts.join(' ').slice(0, 160) };
+}
+
+function visibleTextInSubtree(root, slideRect) {
+  const texts = [];
+  const walk = (node) => {
+    for (const child of node.childNodes || []) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const text = normalizeText(child.textContent || '');
+        if (!text) continue;
+        const range = document.createRange();
+        range.selectNodeContents(child);
+        const rect = range.getBoundingClientRect();
+        range.detach?.();
+        if (rect.width > 1 && rect.height > 1) texts.push(text);
+      } else if (child.nodeType === Node.ELEMENT_NODE && isVisibleElement(child, slideRect)) {
+        walk(child);
+      }
+    }
+  };
+  walk(root);
+  return texts;
+}
+
+function svgTextRisk(svg) {
+  const texts = [...svg.querySelectorAll('text')]
+    .map(el => normalizeText(el.textContent || ''))
+    .filter(Boolean);
+  return { count: texts.length, sample: texts.join(' ').slice(0, 160) };
 }
 
 async function fetchImageDataUrl(url) {
@@ -788,6 +891,25 @@ function hasPaint(color) {
 
 function hasAnyBorder(style) {
   return ['Top', 'Right', 'Bottom', 'Left'].some(side => parseFloat(style?.[`border${side}Width`] || '0') > 0 && hasPaint(style?.[`border${side}Color`]));
+}
+
+function isTextClippedBackground(style) {
+  const clip = `${style?.backgroundClip || ''} ${style?.webkitBackgroundClip || ''}`.toLowerCase();
+  return clip.includes('text');
+}
+
+function textColorForStyle(style) {
+  const fill = parseCssColor(style?.webkitTextFillColor);
+  if (fill) return fill;
+  const color = parseCssColor(style?.color);
+  if (color) return color;
+  const svgFill = parseCssColor(style?.fill);
+  if (svgFill) return svgFill;
+  if (isTextClippedBackground(style)) {
+    const gradientColor = colorFromBackgroundImage(style?.backgroundImage);
+    if (gradientColor) return gradientColor;
+  }
+  return { color: '111111', alpha: 1 };
 }
 
 function parseCssColor(value) {

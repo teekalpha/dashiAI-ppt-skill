@@ -18,6 +18,8 @@ const THEME_FILTER_EXPECTED_SLIDES = 2;
 const VISUAL_RMSE_LIMIT = 0.162;
 const VISUAL_EDGE_RMSE_LIMIT = 0.17;
 const VISUAL_MAE_LIMIT = 0.072;
+const DEFAULT_VISUAL_SAMPLE_COUNT = 6;
+const MATRIX_THEME_PACKS = ['theme02', 'theme04', 'theme08', 'theme09', 'theme10', 'theme11', 'theme12'];
 const EMU_PER_IN = 914400;
 const SAMPLE_TEXT_LAYOUT_ANCHORS = new Map([
   [16, [
@@ -56,7 +58,11 @@ const args = new Set(process.argv.slice(2));
 const legacyRed = args.has('--legacy-red');
 const uiExport = args.has('--ui-export');
 const uiVisualFidelity = args.has('--ui-visual-fidelity');
+const uiVisualMatrix = args.has('--ui-visual-matrix');
+const fallbackTextRisk = args.has('--fallback-text-risk');
 const cliUrl = getArg('--url');
+const cliThemePack = getArg('--theme-pack');
+const cliSamplesPerTheme = Math.max(DEFAULT_VISUAL_SAMPLE_COUNT, Number(getArg('--samples-per-theme') || DEFAULT_VISUAL_SAMPLE_COUNT));
 
 if (!existsSync(CHROME_PATH)) {
   throw new Error(`Chrome executable not found: ${CHROME_PATH}
@@ -69,10 +75,77 @@ if (legacyRed) {
   await runLegacyRedValidation();
 } else if (uiExport) {
   await runUiExportValidation();
+} else if (uiVisualMatrix) {
+  await runUiVisualMatrixValidation();
 } else if (uiVisualFidelity) {
   await runUiVisualFidelityValidation();
+} else if (fallbackTextRisk) {
+  await runFallbackTextRiskValidation();
 } else {
   await runEditableExportValidation();
+}
+
+async function runUiVisualMatrixValidation() {
+  if (!cliUrl) throw new Error('Usage: node scripts/validate-editable-pptx-export.mjs --ui-visual-matrix --url <preview-url>');
+  const themes = (getArg('--themes') || MATRIX_THEME_PACKS.join(','))
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+  const script = fileURLToPath(import.meta.url);
+  const themeResults = [];
+  for (const theme of themes) {
+    const child = spawnSync(process.execPath, [
+      script,
+      '--ui-visual-fidelity',
+      '--url',
+      cliUrl,
+      '--theme-pack',
+      theme,
+      '--samples-per-theme',
+      String(cliSamplesPerTheme),
+    ], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      maxBuffer: 120 * 1024 * 1024,
+    });
+    const parsed = parseJsonProcessOutput(child.stdout, child.stderr);
+    themeResults.push(summarizeMatrixTheme(theme, parsed, child.status));
+  }
+
+  const fallbackChild = spawnSync(process.execPath, [
+    script,
+    '--fallback-text-risk',
+    '--url',
+    cliUrl,
+    '--theme-pack',
+    'theme03',
+  ], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    maxBuffer: 60 * 1024 * 1024,
+  });
+  const fallbackParsed = parseJsonProcessOutput(fallbackChild.stdout, fallbackChild.stderr);
+  const fallbackSummary = summarizeFallbackTextRisk(fallbackParsed, fallbackChild.status);
+  const failures = [
+    ...themeResults.filter(item => !item.passed).map(item => `${item.themePack} failed visual fidelity matrix checks.`),
+    ...(fallbackSummary.passed ? [] : ['theme03 fallback text risk check reported text baked into local fallback images.']),
+  ];
+  const result = {
+    mode: 'ui-visual-matrix',
+    url: cliUrl,
+    samplesPerTheme: cliSamplesPerTheme,
+    passed: failures.length === 0,
+    themes: themeResults,
+    theme03FallbackTextRisk: fallbackSummary,
+    failures,
+  };
+  writeFileSync(path.join(OUT_DIR, 'ui-visual-matrix.json'), JSON.stringify(result, null, 2) + '\n');
+  if (failures.length) {
+    console.error(JSON.stringify(result, null, 2));
+    process.exit(1);
+  }
+  console.log(JSON.stringify(result, null, 2));
+  process.exit(0);
 }
 
 async function runUiVisualFidelityValidation() {
@@ -80,7 +153,7 @@ async function runUiVisualFidelityValidation() {
   const url = cliUrl;
   const staticFailures = inspectUiExportPath();
   const browser = await chromium.launch({ headless: true, executablePath: CHROME_PATH });
-  const visualDir = path.join(OUT_DIR, 'ui-visual-fidelity');
+  const visualDir = path.join(OUT_DIR, cliThemePack ? `ui-visual-fidelity-${safePathSegment(cliThemePack)}` : 'ui-visual-fidelity');
   rmSync(visualDir, { recursive: true, force: true });
   mkdirSync(visualDir, { recursive: true });
 
@@ -102,21 +175,32 @@ async function runUiVisualFidelityValidation() {
     page.on('dialog', dialog => dialog.dismiss().catch(() => {}));
     await page.goto(`${url}${url.includes('?') ? '&' : '?'}ui_visual=${Date.now()}`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#deck > .slide.active, #deck > .slide[data-deck-active]');
+    await installValidationHelpers(page);
+    if (cliThemePack) {
+      await page.evaluate(async themePack => {
+        window.__setActiveThemePack?.(themePack, { navigate: true });
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        window.__finishEditablePptxAnimations?.(document);
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }, cliThemePack);
+    }
     expectedSlides = await page.evaluate(() => (window.__getVisibleSlides?.() || [...document.querySelectorAll('#deck > .slide:not([hidden])')]).length);
     expectations = await collectUiVisualExpectations(page, expectedSlides);
     htmlScreenshot = path.join(visualDir, 'html-slide-001.png');
     await page.evaluate(async () => {
       window.go?.(0, { animate: false, force: true });
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      window.__finishEditablePptxAnimations?.(document);
+      await new Promise(resolve => requestAnimationFrame(resolve));
     });
     const activeSlide = await page.$('#deck > .slide.active, #deck > .slide[data-deck-active]');
     if (!activeSlide) throw new Error('Could not capture active slide screenshot.');
     await activeSlide.screenshot({ path: htmlScreenshot });
 
     await page.click('#preview-export-main');
+    const exportResponsePromise = waitForEditablePptxExportResponse(page, 240000);
     await page.click('#preview-export-pptx');
-    await page.waitForFunction(() => window.__lastPptxExportResult?.filePath, null, { timeout: 240000 });
-    const result = await page.evaluate(() => window.__lastPptxExportResult);
+    const result = await exportResponsePromise;
     pptxFile = result.filePath;
     reportFile = result.reportPath;
     sampleVisuals = await collectSampleVisualComparisons(page, expectations, visualDir);
@@ -138,6 +222,7 @@ async function runUiVisualFidelityValidation() {
   const result = {
     mode: 'ui-visual-fidelity',
     url,
+    themePack: cliThemePack || null,
     expectedSlides,
     passed: failures.length === 0,
     pptx: summarizeInspection(pptx),
@@ -182,12 +267,12 @@ async function runUiExportValidation() {
     expectedSlides = await page.evaluate(() => (window.__getVisibleSlides?.() || [...document.querySelectorAll('#deck > .slide:not([hidden])')]).length);
     mutation = await applyUserEdits(page);
     await page.click('#preview-export-main');
+    const exportResponsePromise = waitForEditablePptxExportResponse(page, 240000);
     const downloadPromise = page.waitForEvent('download', { timeout: 240000 })
       .then(download => ({ download }))
       .catch(error => ({ error: error.message || String(error) }));
     await page.click('#preview-export-pptx');
-    await page.waitForFunction(() => window.__lastPptxExportResult?.filePath, null, { timeout: 180000 });
-    const result = await page.evaluate(() => window.__lastPptxExportResult);
+    const result = await exportResponsePromise;
     pptxFile = result.filePath;
     if (result.downloadUrl) {
       downloadHeaders = await readDownloadHeaders(new URL(result.downloadUrl, url).href);
@@ -238,12 +323,105 @@ async function runUiExportValidation() {
   process.exit(0);
 }
 
+async function waitForEditablePptxExportResponse(page, timeout) {
+  const response = await page.waitForResponse(resp =>
+    resp.request().method() === 'POST' && new URL(resp.url()).pathname === '/api/export-editable-pptx',
+  { timeout });
+  const result = await response.json();
+  if (!response.ok() || !result?.filePath) {
+    throw new Error(result?.error || `Editable PPTX export endpoint failed (${response.status()})`);
+  }
+  return result;
+}
+
+async function runFallbackTextRiskValidation() {
+  if (!cliUrl) throw new Error('Usage: node scripts/validate-editable-pptx-export.mjs --fallback-text-risk --url <preview-url> --theme-pack <theme>');
+  const themePack = cliThemePack || 'theme03';
+  const browser = await chromium.launch({ headless: true, executablePath: CHROME_PATH });
+  let page;
+  let pptxFile = null;
+  let reportFile = null;
+  let expectedSlides = null;
+  let expectedRisks = [];
+  try {
+    const context = await browser.newContext({
+      viewport: { width: 1920, height: 1080 },
+      ignoreHTTPSErrors: true,
+    });
+    page = await context.newPage();
+    page.setDefaultTimeout(180000);
+    await page.goto(`${cliUrl}${cliUrl.includes('?') ? '&' : '?'}fallback_text_risk=${Date.now()}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#deck > .slide.active, #deck > .slide[data-deck-active]');
+    await installValidationHelpers(page);
+    await page.evaluate(async theme => {
+      window.__setActiveThemePack?.(theme, { navigate: true });
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      window.__finishEditablePptxAnimations?.(document);
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    }, themePack);
+    expectedSlides = await page.evaluate(() => (window.__getVisibleSlides?.() || [...document.querySelectorAll('#deck > .slide:not([hidden])')]).length);
+    expectedRisks = await collectFallbackTextRiskExpectations(page, expectedSlides);
+    const outDir = path.join(OUT_DIR, `fallback-text-risk-${safePathSegment(themePack)}`);
+    rmSync(outDir, { recursive: true, force: true });
+    mkdirSync(outDir, { recursive: true });
+    if (expectedRisks.length) {
+      const slideIndexes = [...new Set(expectedRisks.map(item => item.slide - 1))]
+        .filter(index => Number.isInteger(index) && index >= 0)
+        .slice(0, cliSamplesPerTheme);
+      const mod = await import(pathToFileURL(path.join(ROOT, 'src/export-pptx/editable.mjs')));
+      pptxFile = path.join(outDir, `${themePack}.pptx`);
+      reportFile = path.join(outDir, `${themePack}.json`);
+      await mod.exportEditablePptxFromPage(page, {
+        outFile: pptxFile,
+        reportFile,
+        title: `JAD-64 ${themePack} fallback text risk`,
+        slideIndexes,
+      });
+    }
+  } finally {
+    await closePage(page);
+    await closeBrowser(browser);
+  }
+  const report = reportFile && existsSync(reportFile) ? JSON.parse(readFileSync(reportFile, 'utf8')) : null;
+  const risks = (report?.warnings || []).filter(warning => warning?.type === 'node-image-fallback-text-risk');
+  const extracted = (report?.warnings || []).filter(warning => warning?.type === 'node-image-fallback-text-extracted');
+  const failures = [];
+  if (expectedRisks.length && !report) failures.push('Fallback text risk validation did not write a report file.');
+  if (expectedRisks.length && !risks.length && !extracted.length) {
+    failures.push(`${themePack} has ${expectedRisks.length} DOM fallback text candidate(s), but export report did not classify them as extracted or risky.`);
+  }
+  if (risks.length) failures.push(`${themePack} has ${risks.length} local fallback image(s) that include visible descendant text.`);
+  const result = {
+    mode: 'fallback-text-risk',
+    themePack,
+    expectedSlides,
+    passed: failures.length === 0,
+    pptxFile,
+    reportFile,
+    riskCount: risks.length,
+    extractedCount: extracted.length,
+    expectedRiskCount: expectedRisks.length,
+    expectedRisks: expectedRisks.slice(0, 40),
+    extracted: extracted.slice(0, 40),
+    risks: risks.slice(0, 40),
+    failures,
+  };
+  if (failures.length) {
+    console.error(JSON.stringify(result, null, 2));
+    process.exit(1);
+  }
+  console.log(JSON.stringify(result, null, 2));
+  process.exit(0);
+}
+
 async function collectUiVisualExpectations(page, expectedSlides) {
   const expectations = [];
   for (let i = 0; i < expectedSlides; i += 1) {
     expectations.push(await page.evaluate(async (index) => {
       window.go?.(index, { animate: false, force: true });
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      window.__finishEditablePptxAnimations?.(document);
+      await new Promise(resolve => requestAnimationFrame(resolve));
       const slide = document.querySelector('#deck > .slide.active, #deck > .slide[data-deck-active]');
       if (!slide) return { index: index + 1, missing: true };
       const slideRect = slide.getBoundingClientRect();
@@ -288,14 +466,18 @@ async function collectUiVisualExpectations(page, expectedSlides) {
       const walkText = (node) => {
         for (const child of node.childNodes) {
           if (child.nodeType === Node.TEXT_NODE) {
+            if (child.parentElement && !isVisible(child.parentElement)) continue;
             const text = (child.textContent || '').trim().replace(/\s+/g, ' ');
             if (!text) continue;
             const range = document.createRange();
             range.selectNodeContents(child);
             const rect = range.getBoundingClientRect();
-            if (rect.width > 1 && rect.height > 1) metrics.textNodeRects += 1;
+            range.detach?.();
+            if (rect.width > 1 && rect.height > 1
+                && rect.right >= slideRect.left && rect.left <= slideRect.right
+                && rect.bottom >= slideRect.top && rect.top <= slideRect.bottom) metrics.textNodeRects += 1;
           } else if (child.nodeType === Node.ELEMENT_NODE) {
-            walkText(child);
+            if (isVisible(child)) walkText(child);
           }
         }
       };
@@ -334,6 +516,97 @@ async function collectUiVisualExpectations(page, expectedSlides) {
   return expectations;
 }
 
+async function installValidationHelpers(page) {
+  await page.addScriptTag({
+    content: `
+      window.__finishEditablePptxAnimations = function(scope) {
+        const root = scope || document;
+        try {
+          for (const animation of document.getAnimations({ subtree: true })) {
+            const target = animation.effect?.target;
+            if (root !== document && target instanceof Node && !root.contains(target)) continue;
+            try {
+              animation.updatePlaybackRate?.(1);
+              animation.finish();
+            } catch {
+              try {
+                animation.currentTime = animation.effect?.getTiming?.().duration || 999999;
+                animation.pause();
+              } catch {}
+            }
+          }
+        } catch {}
+      };
+    `,
+  });
+}
+
+async function collectFallbackTextRiskExpectations(page, expectedSlides) {
+  const risks = [];
+  for (let i = 0; i < expectedSlides; i += 1) {
+    risks.push(...await page.evaluate(async index => {
+      window.go?.(index, { animate: false, force: true });
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      window.__finishEditablePptxAnimations?.(document);
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const slide = document.querySelector('#deck > .slide.active, #deck > .slide[data-deck-active]');
+      if (!slide) return [];
+      const slideRect = slide.getBoundingClientRect();
+      const out = [];
+      const isVisible = (el) => {
+        const style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) <= 0.01) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 1 && rect.height > 1
+          && rect.right >= slideRect.left && rect.left <= slideRect.right
+          && rect.bottom >= slideRect.top && rect.top <= slideRect.bottom;
+      };
+      const visibleText = (root) => {
+        const texts = [];
+        const walk = (node) => {
+          for (const child of node.childNodes || []) {
+            if (child.nodeType === Node.TEXT_NODE) {
+              const text = (child.textContent || '').trim().replace(/\s+/g, ' ');
+              if (!text) continue;
+              const range = document.createRange();
+              range.selectNodeContents(child);
+              const rect = range.getBoundingClientRect();
+              range.detach?.();
+              if (rect.width > 1 && rect.height > 1) texts.push(text);
+            } else if (child.nodeType === Node.ELEMENT_NODE && isVisible(child)) {
+              walk(child);
+            }
+          }
+        };
+        walk(root);
+        return texts;
+      };
+      const addRisk = (el, kind, texts) => {
+        if (!texts.length) return;
+        out.push({
+          slide: index + 1,
+          key: slide.dataset.vmSlideId || slide.dataset.layoutKey || slide.id || '',
+          kind,
+          textCount: texts.length,
+          sample: texts.join(' ').slice(0, 120),
+        });
+      };
+      slide.querySelectorAll('.bt-unicorn-frame').forEach(el => {
+        if (isVisible(el)) addRisk(el, 'unicorn-background', visibleText(el));
+      });
+      slide.querySelectorAll('svg').forEach(el => {
+        if (!isVisible(el)) return;
+        const texts = [...el.querySelectorAll('text')]
+          .map(textEl => (textEl.textContent || '').trim().replace(/\s+/g, ' '))
+          .filter(Boolean);
+        addRisk(el, 'svg-text', texts);
+      });
+      return out;
+    }, i));
+  }
+  return risks;
+}
+
 async function collectSampleVisualComparisons(page, expectations, visualDir) {
   const mod = await import(pathToFileURL(path.join(ROOT, 'src/export-pptx/editable.mjs')));
   const samples = selectVisualSamples(expectations);
@@ -345,6 +618,8 @@ async function collectSampleVisualComparisons(page, expectations, visualDir) {
     await page.evaluate(async index => {
       window.go?.(index, { animate: false, force: true });
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      window.__finishEditablePptxAnimations?.(document);
+      await new Promise(resolve => requestAnimationFrame(resolve));
     }, sample.index - 1);
     const pptxFile = path.join(sampleDir, `sample-slide-${String(sample.index).padStart(3, '0')}.pptx`);
     const reportFile = path.join(sampleDir, `sample-slide-${String(sample.index).padStart(3, '0')}.json`);
@@ -364,8 +639,10 @@ async function collectSampleVisualComparisons(page, expectations, visualDir) {
     const pptx = inspectPptx(pptxFile);
     const visual = runQuickLookVisualComparison(pptxFile, htmlScreenshot, sampleDir);
     const textLayoutFailures = validateSampleTextLayout(sample, pptx);
+    const expected = summarizeExpectation(expectations.find(item => item.index === sample.index));
     out.push({
       ...sample,
+      expected,
       pptx: summarizeInspection(pptx),
       quickLook: visual,
       textLayoutFailures,
@@ -381,15 +658,68 @@ function selectVisualSamples(expectations) {
   const picks = [];
   const add = (label, predicate) => {
     const found = expectations.find(item => predicate(item) && !picks.some(pick => pick.index === item.index));
-    if (found) picks.push({ index: found.index, key: found.key || '', label });
+    if (found) picks.push({ index: found.index, key: found.key || '', label, types: classifySampleTypes(found) });
   };
   add('cover', item => item.index === 1);
-  add('card-table', item => item.borderElements >= 8 && item.textNodeRects >= 25);
-  add('svg-chart', item => item.svgElements > 0);
+  add('title-section', item => item.index !== 1 && item.textNodeRects >= 6 && item.elementCount <= 35);
+  add('data-table', item => item.borderElements >= 8 && item.textNodeRects >= 20);
+  add('chart-values', item => item.svgElements > 0 || item.canvasElements > 0);
   add('canvas-chart', item => item.canvasElements > 0);
-  add('image-slot', item => item.imageElements > 0 || item.backgroundUrlElements > 0);
-  add('dense-data', item => item.elementCount >= 65 && item.textNodeRects >= 30);
-  return picks.slice(0, 6);
+  add('media-slot', item => item.imageElements > 0 || item.backgroundUrlElements > 0 || item.unicornFrameElements > 0);
+  add('complex-background', item => item.gradientElements >= 3 || item.shadowElements >= 4 || item.maxDepth >= 8);
+  add('dense-data', item => item.elementCount >= 65 || item.textNodeRects >= 30);
+  const ranked = [...expectations]
+    .filter(item => !item.missing && !picks.some(pick => pick.index === item.index))
+    .sort((a, b) => sampleComplexityScore(b) - sampleComplexityScore(a));
+  for (const item of ranked) {
+    if (picks.length >= cliSamplesPerTheme) break;
+    picks.push({ index: item.index, key: item.key || '', label: 'coverage-fill', types: classifySampleTypes(item) });
+  }
+  return picks.slice(0, Math.min(cliSamplesPerTheme, expectations.length));
+}
+
+function classifySampleTypes(item = {}) {
+  const types = [];
+  if (item.index === 1) types.push('cover');
+  if (item.index !== 1 && item.textNodeRects >= 6 && item.elementCount <= 35) types.push('title-section');
+  if (item.borderElements >= 8 && item.textNodeRects >= 20) types.push('data-table');
+  if (item.svgElements > 0 || item.canvasElements > 0) types.push('chart-values');
+  if (item.imageElements > 0 || item.backgroundUrlElements > 0 || item.unicornFrameElements > 0) types.push('media-slot');
+  if (item.gradientElements >= 3 || item.shadowElements >= 4 || item.maxDepth >= 8) types.push('complex-background');
+  if (item.elementCount >= 65 || item.textNodeRects >= 30) types.push('dense-data');
+  return types.length ? types : ['general'];
+}
+
+function sampleComplexityScore(item = {}) {
+  return Number(item.textNodeRects || 0) * 2
+    + Number(item.elementCount || 0)
+    + Number(item.borderElements || 0) * 4
+    + Number(item.svgElements || 0) * 12
+    + Number(item.canvasElements || 0) * 12
+    + Number(item.backgroundUrlElements || 0) * 10
+    + Number(item.unicornFrameElements || 0) * 10
+    + Number(item.gradientElements || 0) * 2
+    + Number(item.shadowElements || 0) * 3
+    + Number(item.maxDepth || 0) * 3;
+}
+
+function summarizeExpectation(item = {}) {
+  return {
+    textNodeRects: item.textNodeRects || 0,
+    elementCount: item.elementCount || 0,
+    backgroundColorElements: item.backgroundColorElements || 0,
+    backgroundImageElements: item.backgroundImageElements || 0,
+    backgroundUrlElements: item.backgroundUrlElements || 0,
+    gradientElements: item.gradientElements || 0,
+    borderElements: item.borderElements || 0,
+    radiusElements: item.radiusElements || 0,
+    shadowElements: item.shadowElements || 0,
+    svgElements: item.svgElements || 0,
+    canvasElements: item.canvasElements || 0,
+    unicornFrameElements: item.unicornFrameElements || 0,
+    imageElements: item.imageElements || 0,
+    maxDepth: item.maxDepth || 0,
+  };
 }
 
 function validateVisualFidelityReport({ report, pptx, expectations, expectedSlides, visual }) {
@@ -434,6 +764,22 @@ function validateVisualFidelityReport({ report, pptx, expectations, expectedSlid
     failures.push(`Captured tree is too shallow for visually rich slides: ${flatCaptures.slice(0, 12).join(', ')}.`);
   }
 
+  const foregroundLoss = expectations
+    .filter(item => item.textNodeRects >= 6 || item.elementCount >= 20)
+    .map(item => {
+      const slide = pptx.slides[item.index - 1];
+      if (!slide) return { item, lost: true, detail: 'missing-slide' };
+      const minText = item.textNodeRects >= 6 ? Math.max(2, Math.ceil(item.textNodeRects * 0.35)) : 0;
+      const minForeground = item.elementCount >= 20 ? Math.max(4, Math.ceil(item.elementCount * 0.08)) : 0;
+      const foreground = foregroundObjectCount(slide, item);
+      const lost = slide.text.length < minText || foreground < minForeground;
+      return { item, lost, detail: `text ${slide.text.length}/${minText}, foreground ${foreground}/${minForeground}, pictures ${slide.pictureCount || 0}, elements ${item.elementCount}` };
+    })
+    .filter(entry => entry.lost);
+  if (foregroundLoss.length) {
+    failures.push(`Slides appear to have lost foreground content: ${foregroundLoss.slice(0, 12).map(entry => `${entry.item.index} (${entry.detail})`).join(', ')}.`);
+  }
+
   if (visual.available) {
     if (visual.normalizedRmse > VISUAL_RMSE_LIMIT) {
       failures.push(`Quick Look visual RMSE is too high (${visual.normalizedRmse.toFixed(4)} > ${VISUAL_RMSE_LIMIT.toFixed(4)}).`);
@@ -456,10 +802,14 @@ function validateSampleVisuals(samples) {
     failures.push('Visual fidelity validation did not select any multi-page samples.');
     return failures;
   }
+  if (samples.length < cliSamplesPerTheme) {
+    failures.push(`Visual fidelity validation selected only ${samples.length} sample page(s), expected ${cliSamplesPerTheme}.`);
+  }
   for (const sample of samples) {
     const label = `${sample.label || 'sample'} slide ${sample.index}`;
     if (sample.pptx?.slideCount !== 1) failures.push(`${label} did not render as a single-slide visual sample.`);
     if (sample.pptx?.fullSlideImageOnlySlides?.length) failures.push(`${label} became a full-slide-image-only PPTX sample.`);
+    failures.push(...validateSampleStructure(sample, label));
     const visual = sample.quickLook;
     if (!visual?.available) {
       failures.push(`${label} Quick Look comparison unavailable: ${visual?.reason || sample.reason || 'unknown'}.`);
@@ -473,7 +823,38 @@ function validateSampleVisuals(samples) {
   return failures;
 }
 
+function validateSampleStructure(sample, label) {
+  const failures = [];
+  const expected = sample.expected || {};
+  const pptx = sample.pptx || {};
+  const expectedText = Number(expected.textNodeRects || 0);
+  if (expectedText >= 6) {
+    const minText = Math.max(2, Math.ceil(expectedText * 0.5));
+    if (Number(pptx.textCount || 0) < minText) {
+      failures.push(`${label} is missing editable text content (${pptx.textCount || 0} text objects for ${expectedText} visible text rects).`);
+    }
+  }
+  const expectedComplexImage = Number(expected.svgElements || 0) + Number(expected.canvasElements || 0) + Number(expected.backgroundUrlElements || 0) + Number(expected.unicornFrameElements || 0);
+  if (expectedComplexImage > 0 && Number(pptx.pictureCount || 0) <= 0) {
+    failures.push(`${label} expected local image fallback objects for SVG/canvas/background media, but exported none.`);
+  }
+  if (Number(expected.elementCount || 0) >= 20) {
+    const nonBackgroundObjects = foregroundObjectCount({ text: Array.from({ length: Number(pptx.textCount || 0) }), pictureCount: Number(pptx.pictureCount || 0) }, expected);
+    if (nonBackgroundObjects < Math.max(4, Math.ceil(Number(expected.elementCount || 0) * 0.12))) {
+      failures.push(`${label} appears to have lost foreground content (${nonBackgroundObjects} text/image objects for ${expected.elementCount} visible elements).`);
+    }
+  }
+  return failures;
+}
+
+function foregroundObjectCount(slide, expected) {
+  const textCount = Array.isArray(slide?.text) ? slide.text.length : Number(slide?.textCount || 0);
+  const pictureCount = Number(slide?.pictureCount || 0);
+  return textCount + pictureCount * 8;
+}
+
 function validateSampleTextLayout(sample, pptx) {
+  if (cliThemePack && cliThemePack !== 'theme01') return [];
   const anchors = SAMPLE_TEXT_LAYOUT_ANCHORS.get(sample.index) || [];
   const slide = pptx.slides[0];
   const failures = [];
@@ -495,13 +876,15 @@ function validateSampleTextLayout(sample, pptx) {
 
 function summarizeVisualReport(report) {
   const summaries = Array.isArray(report.slideSummaries) ? report.slideSummaries : [];
+  const warnings = Array.isArray(report.warnings) ? report.warnings : [];
   return {
     captureMode: report.captureMode || null,
     slideCount: report.slideCount,
     textObjects: report.textObjects,
     shapeObjects: report.shapeObjects,
     imageObjects: report.imageObjects,
-    warningCount: Array.isArray(report.warnings) ? report.warnings.length : null,
+    warningCount: warnings.length,
+    fallbackTextRiskCount: warnings.filter(warning => warning?.type === 'node-image-fallback-text-risk').length,
     slideSummaries: summaries.slice(0, 5),
   };
 }
@@ -554,6 +937,74 @@ function compareImageMetric(metric, left, right) {
   const output = `${compare.stderr || ''}${compare.stdout || ''}`;
   const match = output.match(/\((0(?:\.\d+)?|1(?:\.0+)?)\)/);
   return match ? Number(match[1]) : Number.NaN;
+}
+
+function parseJsonProcessOutput(stdout, stderr) {
+  const combined = `${stdout || ''}\n${stderr || ''}`.trim();
+  const first = combined.indexOf('{');
+  const last = combined.lastIndexOf('}');
+  if (first < 0 || last < first) return { parseError: true, raw: combined.slice(0, 4000) };
+  try {
+    return JSON.parse(combined.slice(first, last + 1));
+  } catch {
+    return { parseError: true, raw: combined.slice(0, 4000) };
+  }
+}
+
+function summarizeMatrixTheme(themePack, result, status) {
+  const failures = Array.isArray(result?.failures) ? result.failures : [`validation process exited with status ${status}`];
+  const samples = Array.isArray(result?.samples) ? result.samples.map(sample => ({
+    index: sample.index,
+    key: sample.key || '',
+    label: sample.label || '',
+    types: sample.types || [],
+    htmlImage: sample.quickLook?.htmlImage || sample.htmlScreenshot || null,
+    pptxImage: sample.quickLook?.pptxImage || null,
+    rmse: sample.quickLook?.normalizedRmse ?? null,
+    edgeRmse: sample.quickLook?.edgeRmse ?? null,
+    mae: sample.quickLook?.meanAbsoluteError ?? null,
+    expected: sample.expected || null,
+    pptx: sample.pptx || null,
+  })) : [];
+  return {
+    themePack,
+    passed: status === 0 && result?.passed === true,
+    expectedSlides: result?.expectedSlides ?? null,
+    failureCategories: categorizeFailures(failures, result),
+    failures,
+    samples,
+    fullDeck: result?.pptx || null,
+    report: result?.report || null,
+    parseError: result?.parseError || false,
+  };
+}
+
+function summarizeFallbackTextRisk(result, status) {
+  return {
+    passed: status === 0 && result?.passed === true,
+    themePack: result?.themePack || 'theme03',
+    riskCount: result?.riskCount ?? null,
+    extractedCount: result?.extractedCount ?? null,
+    expectedRiskCount: result?.expectedRiskCount ?? null,
+    extracted: Array.isArray(result?.extracted) ? result.extracted.slice(0, 20) : [],
+    risks: Array.isArray(result?.risks) ? result.risks.slice(0, 20) : [],
+    failures: Array.isArray(result?.failures) ? result.failures : [`validation process exited with status ${status}`],
+    parseError: result?.parseError || false,
+  };
+}
+
+function categorizeFailures(failures, result) {
+  const categories = new Set();
+  const text = failures.join('\n');
+  if (/text|foreground content|主体|editable text/i.test(text)) categories.add('content-loss');
+  if (/RMSE|MAE|visual/i.test(text)) categories.add('visual-drift');
+  if (/edge RMSE|align|layout|too wide|position/i.test(text)) categories.add('alignment-layout');
+  if (/background|gradient|fill/i.test(text)) categories.add('background-fill');
+  if (/SVG|canvas|fallback|image objects|media/i.test(text)) categories.add('complex-node-fallback');
+  if (/Captured tree is too shallow|captured-tree|DOM/i.test(text)) categories.add('capture-depth');
+  if (/animation|opacity|transition/i.test(text)) categories.add('animation-final-state');
+  if (result?.report?.fallbackTextRiskCount > 0) categories.add('fallback-text-baked');
+  return [...categories];
 }
 
 function commandAvailable(name) {
@@ -1109,4 +1560,8 @@ function isDirectory(file) {
 function getArg(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : null;
+}
+
+function safePathSegment(value) {
+  return String(value || '').replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'deck';
 }
