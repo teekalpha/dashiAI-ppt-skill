@@ -141,10 +141,10 @@ async function runTheme10UserRegressionValidation() {
       slide: 76,
       layout: 'SlideCollage',
       failureType: 'transform/rotation/stage layout drift',
-      currentExporterGap: 'Rotated polaroid frames depend on transform-origin, image-slot aspect measurement, border stacking, and z-order; visual drift is not captured by object-count checks.',
-      suggestedFix: 'Audit transform-origin and rotated bounding-box export for media frame groups before broad fixes.',
+      currentExporterGap: 'Text inside rotated polaroid frames was exported without the parent rotation, causing captions and placeholders to drift against the cards.',
+      suggestedFix: 'Propagate cumulative parent rotation into captured text styles so editable text stays aligned with rotated frames.',
       sharedMechanism: true,
-      status: 'diagnostic-only',
+      status: 'fixed',
     },
     {
       screenshot: 3,
@@ -161,10 +161,10 @@ async function runTheme10UserRegressionValidation() {
       slide: 86,
       layout: 'SlideVenn',
       failureType: 'alpha blend/radial gradient mismatch',
-      currentExporterGap: 'Radial-gradient discs with mix-blend-mode and glow are approximated as plain shapes/images, shifting overlap and label balance.',
-      suggestedFix: 'Treat blend-heavy non-text visual layers as local shape/image backgrounds while preserving labels as text.',
+      currentExporterGap: 'Radial-gradient discs with mix-blend-mode were also receiving rectangular border segments; blend/glow intensity remains an approximation.',
+      suggestedFix: 'Render circle-like bordered elements with ellipse geometry only, avoiding four rectangular border artifacts. Keep true screen-blend/glow parity as a later rendering boundary.',
       sharedMechanism: true,
-      status: 'diagnostic-only',
+      status: 'partially-fixed',
     },
     {
       screenshot: 5,
@@ -196,7 +196,27 @@ async function runTheme10UserRegressionValidation() {
   let media = [];
   const polygonChecks = [];
   const balanceChecks = [];
+  const collageChecks = [];
+  const vennChecks = [];
+  const visualChecks = [];
   const failures = [];
+  const addVisualEvidence = (sample, sampleDir, pptxFile) => {
+    const htmlScreenshot = path.join(sampleDir, 'html-slide.png');
+    const visual = runQuickLookVisualComparison(pptxFile, htmlScreenshot, sampleDir);
+    const pairImage = createSamplePairImage(sample, visual, sampleDir);
+    const passed = Boolean(visual?.available && pairImage);
+    visualChecks.push({
+      slide: sample.slide,
+      key: sample.key,
+      label: sample.label,
+      htmlScreenshot,
+      pptxFile,
+      pairImage,
+      quickLook: visual,
+      passed,
+    });
+    if (!passed) failures.push(`${sample.label} did not produce HTML/PPTX visual evidence pair (${visual?.reason || 'missing-compare-pair'}).`);
+  };
   try {
     const context = await browser.newContext({
       viewport: { width: 1920, height: 1080 },
@@ -277,6 +297,7 @@ async function runTheme10UserRegressionValidation() {
           slideIndexes: [sample.slide - 1],
         });
         pptx = inspectPptx(pptxFile);
+        addVisualEvidence(sample, sampleDir, pptxFile);
         const mediaDir = path.join(sampleDir, 'media');
         mkdirSync(mediaDir, { recursive: true });
         spawnSync('unzip', ['-q', '-o', pptxFile, 'ppt/media/*', '-d', mediaDir], { encoding: 'utf8' });
@@ -312,6 +333,7 @@ async function runTheme10UserRegressionValidation() {
           slideIndexes: [sample.slide - 1],
         });
         const samplePptx = inspectPptx(pptxFile);
+        addVisualEvidence(sample, sampleDir, pptxFile);
         const geoms = samplePptx.slides[0]?.shapeGeoms || [];
         const polygonGeomCount = geoms.filter(geom => ['custGeom', 'hexagon', 'trapezoid', 'nonIsoscelesTrapezoid'].includes(geom)).length;
         const expected = sample.slide === 82 ? 4 : 6;
@@ -330,6 +352,84 @@ async function runTheme10UserRegressionValidation() {
         if (!passed) {
           failures.push(`${sample.label} exported ${polygonGeomCount}/${expected} polygon shape geometries; clip-path polygons are still being flattened to rectangles.`);
         }
+      }
+      if (sample.slide === 76) {
+        const mod = await import(pathToFileURL(path.join(ROOT, 'src/export-pptx/editable.mjs')));
+        const pptxFile = path.join(sampleDir, `${sample.label}.pptx`);
+        const reportFile = path.join(sampleDir, `${sample.label}-report.json`);
+        const dom = await page.evaluate(() => {
+          const slide = document.querySelector('#deck > .slide.active, #deck > .slide[data-deck-active]');
+          return [...slide?.querySelectorAll('.clg-frame') || []].map(frame => ({
+            text: (frame.innerText || '').trim().replace(/\s+/g, ' '),
+            transform: getComputedStyle(frame).transform,
+            rect: (() => {
+              const slideRect = slide.getBoundingClientRect();
+              const rect = frame.getBoundingClientRect();
+              return { x: rect.left - slideRect.left, y: rect.top - slideRect.top, w: rect.width, h: rect.height };
+            })(),
+          }));
+        });
+        await mod.exportEditablePptxFromPage(page, {
+          outFile: pptxFile,
+          reportFile,
+          title: 'JAD-64 theme10 collage regression',
+          slideIndexes: [sample.slide - 1],
+        });
+        const samplePptx = inspectPptx(pptxFile);
+        addVisualEvidence(sample, sampleDir, pptxFile);
+        const textBoxes = samplePptx.slides[0]?.textBoxes || [];
+        const rotatedTextBoxes = textBoxes.filter(box => Math.abs(box.rotate || 0) >= 1);
+        const expectedRotatedText = Math.max(8, dom.length * 2);
+        const passed = rotatedTextBoxes.length >= expectedRotatedText;
+        collageChecks.push({
+          slide: sample.slide,
+          key: sample.key,
+          label: sample.label,
+          pptxFile,
+          reportFile,
+          frameCount: dom.length,
+          expectedRotatedText,
+          rotatedTextCount: rotatedTextBoxes.length,
+          sampleRotatedText: rotatedTextBoxes.slice(0, 8),
+          passed,
+        });
+        if (!passed) {
+          failures.push(`${sample.label} exported ${rotatedTextBoxes.length}/${expectedRotatedText} rotated collage text boxes; text inside rotated frames is not following parent rotation.`);
+        }
+      }
+      if (sample.slide === 86) {
+        const mod = await import(pathToFileURL(path.join(ROOT, 'src/export-pptx/editable.mjs')));
+        const pptxFile = path.join(sampleDir, `${sample.label}.pptx`);
+        const reportFile = path.join(sampleDir, `${sample.label}-report.json`);
+        await mod.exportEditablePptxFromPage(page, {
+          outFile: pptxFile,
+          reportFile,
+          title: 'JAD-64 theme10 venn regression',
+          slideIndexes: [sample.slide - 1],
+        });
+        const samplePptx = inspectPptx(pptxFile);
+        addVisualEvidence(sample, sampleDir, pptxFile);
+        const details = samplePptx.slides[0]?.shapeDetails || [];
+        const thinRectArtifacts = details.filter(shape => {
+          if (shape.geom !== 'rect') return false;
+          const minSide = Math.min(shape.w || 0, shape.h || 0);
+          const maxSide = Math.max(shape.w || 0, shape.h || 0);
+          return minSide > 0 && minSide <= 0.04 && maxSide >= 2.2;
+        });
+        const ellipseCount = details.filter(shape => shape.geom === 'ellipse').length;
+        const passed = thinRectArtifacts.length === 0 && ellipseCount >= 3;
+        vennChecks.push({
+          slide: sample.slide,
+          key: sample.key,
+          label: sample.label,
+          pptxFile,
+          reportFile,
+          ellipseCount,
+          thinRectArtifacts,
+          passed,
+        });
+        if (thinRectArtifacts.length) failures.push(`${sample.label} exported ${thinRectArtifacts.length} long thin rect border artifact(s) around Venn circles.`);
+        if (ellipseCount < 3) failures.push(`${sample.label} exported ${ellipseCount}/3 ellipse circle geometries for the Venn discs.`);
       }
       if (sample.slide === 87) {
         const mod = await import(pathToFileURL(path.join(ROOT, 'src/export-pptx/editable.mjs')));
@@ -362,6 +462,7 @@ async function runTheme10UserRegressionValidation() {
           slideIndexes: [sample.slide - 1],
         });
         const samplePptx = inspectPptx(pptxFile);
+        addVisualEvidence(sample, sampleDir, pptxFile);
         const details = samplePptx.slides[0]?.shapeDetails || [];
         const pptRect = rect => rect ? ({
           x: rect.x / 1356 * 16,
@@ -422,6 +523,9 @@ async function runTheme10UserRegressionValidation() {
     },
     polygonChecks,
     balanceChecks,
+    collageChecks,
+    vennChecks,
+    visualChecks,
     samples,
     failures,
   };
@@ -3155,16 +3259,18 @@ function inspectSlideXml(xml, index, relsXml, mediaByEntry) {
 function inspectTextBoxShape(xml) {
   const runs = [...xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map(match => decodeXml(match[1]));
   if (!runs.length) return null;
-  const xfrm = xml.match(/<a:xfrm\b[\s\S]*?<a:off x="(\d+)" y="(\d+)"[\s\S]*?<a:ext cx="(\d+)" cy="(\d+)"/);
+  const xfrm = xml.match(/<a:xfrm\b([^>]*)>[\s\S]*?<a:off x="(\d+)" y="(\d+)"[\s\S]*?<a:ext cx="(\d+)" cy="(\d+)"/);
   if (!xfrm) return null;
+  const rotateRaw = xfrm[1]?.match(/\brot="(-?\d+)"/)?.[1];
   const align = xml.match(/<a:pPr\b[^>]*\balgn="([^"]+)"/)?.[1] || 'l';
   return {
     text: runs.join(''),
     align,
-    x: Number(xfrm[1]) / EMU_PER_IN,
-    y: Number(xfrm[2]) / EMU_PER_IN,
-    w: Number(xfrm[3]) / EMU_PER_IN,
-    h: Number(xfrm[4]) / EMU_PER_IN,
+    rotate: rotateRaw == null ? 0 : Number(rotateRaw) / 60000,
+    x: Number(xfrm[2]) / EMU_PER_IN,
+    y: Number(xfrm[3]) / EMU_PER_IN,
+    w: Number(xfrm[4]) / EMU_PER_IN,
+    h: Number(xfrm[5]) / EMU_PER_IN,
   };
 }
 

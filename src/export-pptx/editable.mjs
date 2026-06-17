@@ -614,7 +614,7 @@ function renderBox(slide, node, slideRect, warnings, totals) {
     }
   }
 
-  if (hasBorder && !rotate && !borderTriangle) renderBorders(slide, c, borders, slideRect, style.opacity, totals);
+  if (hasBorder && !rotate && !borderTriangle && shapeName !== 'ellipse') renderBorders(slide, c, borders, slideRect, style.opacity, totals);
 }
 
 function isTinyRotatedBorderOnlyPseudo(node, c, hasFill, hasBorder, rotate) {
@@ -729,11 +729,13 @@ function isDecorativeLowAlphaText(color, style, fontSizePx) {
 }
 
 function isDecorativeRotatedSmallText(value, style, fontSizePx, node = {}) {
-  return node.source !== 'svg-text'
-    && !node.requiredText
-    && !isVerticalWritingMode(style)
-    && rotateFromTransform(style?.transform)
-    && fontSizePx <= 32
+  if (node.source === 'svg-text' || node.requiredText || isVerticalWritingMode(style) || !rotateFromTransform(style?.transform) || fontSizePx > 32) {
+    return false;
+  }
+  const color = parseCssColor(style?.webkitTextFillColor) || parseCssColor(style?.color);
+  const opacity = Number(style?.opacity || 1);
+  const alpha = Math.max(0, Math.min(1, Number(color?.alpha ?? 1) * (Number.isFinite(opacity) ? opacity : 1)));
+  return alpha <= 0.18
     && String(value || '').trim().length >= 4;
 }
 
@@ -1093,7 +1095,7 @@ function captureTextNode(textNode, parent, slideRect, style, slideIndex) {
 }
 
 function effectiveTextStyle(parent, slideRect) {
-  const style = readStyle(parent);
+  const style = styleWithCumulativeRotation(readStyle(parent), parent);
   if (!transparentCssPaint(style.webkitTextFillColor) || !transparentCssPaint(style.color) || isTextClippedBackground(style) || hasTextPaintSource(style)) {
     return style;
   }
