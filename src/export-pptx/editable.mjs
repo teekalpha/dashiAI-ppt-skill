@@ -488,6 +488,7 @@ async function installBrowserCollector(page) {
         ${collectSvgTextNodes.toString()}
         ${cloneSvgWithComputedStyle.toString()}
         ${isTextClippedBackground.toString()}
+        ${shouldUseNativeGradientShape.toString()}
         ${patternBackgroundImageData.toString()}
         ${parseRepeatingGradient.toString()}
         ${gradientBackgroundImageData.toString()}
@@ -574,7 +575,8 @@ function renderBox(slide, node, slideRect, warnings, totals) {
     return;
   }
   const isLargeGradient = fill?.gradient && c.w > PPT_W * 0.72 && c.h > PPT_H * 0.72;
-  const isDecorativeGradient = fill?.gradient && !isLargeGradient && !(node.children || []).length;
+  const isNarrowGradientLine = fill?.gradient && Math.min(c.w, c.h) <= 0.12 && Math.max(c.w, c.h) >= 0.35;
+  const isDecorativeGradient = fill?.gradient && !isLargeGradient && !isNarrowGradientLine && !(node.children || []).length;
   const fillAlpha = isDecorativeGradient ? Math.min(fill.alpha, 0.08) : fill?.alpha;
   const shapeName = isDecorativeGradient && radius > Math.min(c.w, c.h) * 0.2
     ? 'ellipse'
@@ -919,7 +921,7 @@ async function captureElement(el, slideRect, warnings, depth, slideIndex) {
   } else if (String(style.backgroundImage || '').includes('repeating-linear-gradient')) {
     node.patternImageData = patternBackgroundImageData(style.backgroundImage, clipped.width, clipped.height, maxCssRadius(style, clipped.width, clipped.height));
     if (node.patternImageData) warnings.push({ slide: slideIndex, type: 'node-image-fallback', node: 'css-pattern-background', count: 1 });
-  } else if (!isTextClippedBackground(style) && String(style.backgroundImage || '').includes('gradient')) {
+  } else if (!isTextClippedBackground(style) && String(style.backgroundImage || '').includes('gradient') && !shouldUseNativeGradientShape(style, clipped.width, clipped.height)) {
     node.backgroundImageData = gradientBackgroundImageData(style.backgroundImage, clipped.width, clipped.height, maxCssRadius(style, clipped.width, clipped.height));
     if (node.backgroundImageData) warnings.push({ slide: slideIndex, type: 'node-image-fallback', node: 'css-gradient-background', count: 1 });
   }
@@ -1889,6 +1891,14 @@ function cssPx(value) {
 function isTextClippedBackground(style) {
   const clip = `${style?.backgroundClip || ''} ${style?.webkitBackgroundClip || ''}`.toLowerCase();
   return clip.includes('text');
+}
+
+function shouldUseNativeGradientShape(style = {}, width = 0, height = 0) {
+  const background = String(style.backgroundImage || '');
+  if (!/linear-gradient/i.test(background) || /repeating-linear-gradient/i.test(background)) return false;
+  const minSide = Math.min(Number(width) || 0, Number(height) || 0);
+  const maxSide = Math.max(Number(width) || 0, Number(height) || 0);
+  return minSide > 0 && minSide <= 16 && maxSide >= 24;
 }
 
 function textColorForStyle(style, node = {}) {

@@ -78,6 +78,7 @@ const uiVisualFidelity = args.has('--ui-visual-fidelity');
 const uiVisualMatrix = args.has('--ui-visual-matrix');
 const fallbackTextRisk = args.has('--fallback-text-risk');
 const fallbackTextRiskMatrix = args.has('--fallback-text-risk-matrix');
+const theme10UserRegressions = args.has('--theme10-user-regressions');
 const cliUrl = getArg('--url');
 const cliThemePack = getArg('--theme-pack');
 const cliSamplesPerTheme = Math.max(DEFAULT_VISUAL_SAMPLE_COUNT, Number(getArg('--samples-per-theme') || DEFAULT_VISUAL_SAMPLE_COUNT));
@@ -105,8 +106,225 @@ if (legacyRed) {
   await runFallbackTextRiskMatrixValidation();
 } else if (fallbackTextRisk) {
   await runFallbackTextRiskValidation();
+} else if (theme10UserRegressions) {
+  await runTheme10UserRegressionValidation();
 } else {
   await runEditableExportValidation();
+}
+
+async function runTheme10UserRegressionValidation() {
+  if (!cliUrl) throw new Error('Usage: node scripts/validate-editable-pptx-export.mjs --theme10-user-regressions --url <preview-url>');
+  const outDir = path.join(OUT_DIR, 'theme10-user-regressions');
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  const samples = [
+    { screenshot: 1, slide: 79, key: 'theme10_page079-831', layout: 'SlidePoster', label: 'unicorn-poster-rule', coverage: 'unicorn/shader background + foreground gradient rule' },
+    { screenshot: 2, slide: 76, key: 'theme10_page076-828', layout: 'SlideCollage', label: 'collage-polaroid', coverage: 'rotated media cards, borders, stacking' },
+    { screenshot: 3, slide: 82, key: 'theme10_page082-834', layout: 'SlidePyramid', label: 'pyramid-polygon', coverage: 'clip-path polygon trapezoids' },
+    { screenshot: 4, slide: 86, key: 'theme10_page086-838', layout: 'SlideVenn', label: 'venn-blend', coverage: 'radial gradients, alpha overlap, labels' },
+    { screenshot: 5, slide: 87, key: 'theme10_page087-839', layout: 'SlideBalance', label: 'balance-scale', coverage: 'rotated gradient line, triangle pivot, cards' },
+    { screenshot: 6, slide: 91, key: 'theme10_page091-843', layout: 'SlideHive', label: 'hive-hexagons', coverage: 'clip-path polygon hexagons' },
+  ];
+  const rootCauseMatrix = [
+    {
+      screenshot: 1,
+      slide: 79,
+      layout: 'SlidePoster',
+      failureType: 'unicorn foreground overlay rasterization',
+      currentExporterGap: 'Narrow CSS linear-gradient foreground rules are exported as small PNG media instead of native PPT shape/line objects.',
+      suggestedFix: 'Render narrow non-text linear-gradient foreground elements as native shapes with representative fill; keep unicorn/shader as a separate local background image.',
+      sharedMechanism: true,
+      status: 'targeted-validation',
+    },
+    {
+      screenshot: 2,
+      slide: 76,
+      layout: 'SlideCollage',
+      failureType: 'transform/rotation/stage layout drift',
+      currentExporterGap: 'Rotated polaroid frames depend on transform-origin, image-slot aspect measurement, border stacking, and z-order; visual drift is not captured by object-count checks.',
+      suggestedFix: 'Audit transform-origin and rotated bounding-box export for media frame groups before broad fixes.',
+      sharedMechanism: true,
+      status: 'diagnostic-only',
+    },
+    {
+      screenshot: 3,
+      slide: 82,
+      layout: 'SlidePyramid',
+      failureType: 'clip-path polygon lost',
+      currentExporterGap: 'CSS polygon trapezoids are rendered as rectangular PPT shapes.',
+      suggestedFix: 'Map supported CSS polygon shapes to PPT freeform/native geometry or bounded local fallback with text extracted.',
+      sharedMechanism: true,
+      status: 'diagnostic-only',
+    },
+    {
+      screenshot: 4,
+      slide: 86,
+      layout: 'SlideVenn',
+      failureType: 'alpha blend/radial gradient mismatch',
+      currentExporterGap: 'Radial-gradient discs with mix-blend-mode and glow are approximated as plain shapes/images, shifting overlap and label balance.',
+      suggestedFix: 'Treat blend-heavy non-text visual layers as local shape/image backgrounds while preserving labels as text.',
+      sharedMechanism: true,
+      status: 'diagnostic-only',
+    },
+    {
+      screenshot: 5,
+      slide: 87,
+      layout: 'SlideBalance',
+      failureType: 'rotated gradient line and pseudo geometry mismatch',
+      currentExporterGap: 'The tilted gradient beam, pseudo pivot, triangle support, and card shadows combine transform, gradient and border-triangle CSS not fully mapped to PPT.',
+      suggestedFix: 'First fix narrow gradient line native-shape export, then map CSS border triangles/rotated groups if still visibly off.',
+      sharedMechanism: true,
+      status: 'diagnostic-only',
+    },
+    {
+      screenshot: 6,
+      slide: 91,
+      layout: 'SlideHive',
+      failureType: 'clip-path polygon lost',
+      currentExporterGap: 'CSS hexagons are exported as rectangles; pseudo outline is not preserving hex geometry.',
+      suggestedFix: 'Share the polygon mapping/fallback strategy with SlidePyramid.',
+      sharedMechanism: true,
+      status: 'diagnostic-only',
+    },
+  ];
+  writeFileSync(path.join(outDir, 'root-cause-matrix.json'), JSON.stringify(rootCauseMatrix, null, 2) + '\n');
+
+  const browser = await chromium.launch({ headless: true, executablePath: CHROME_PATH });
+  let page;
+  let posterInfo = null;
+  let pptx = null;
+  let media = [];
+  const failures = [];
+  try {
+    const context = await browser.newContext({
+      viewport: { width: 1920, height: 1080 },
+      ignoreHTTPSErrors: true,
+    });
+    page = await context.newPage();
+    page.setDefaultTimeout(180000);
+    await page.goto(`${cliUrl}${cliUrl.includes('?') ? '&' : '?'}theme10_regressions=${Date.now()}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#deck > .slide.active, #deck > .slide[data-deck-active]');
+    await installValidationHelpers(page);
+    await page.evaluate(async () => {
+      window.__setActiveThemePack?.('theme10', { navigate: true });
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      window.__finishEditablePptxAnimations?.(document);
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    });
+    for (const sample of samples) {
+      const sampleDir = path.join(outDir, `sample-${String(sample.slide).padStart(3, '0')}-${sample.label}`);
+      mkdirSync(sampleDir, { recursive: true });
+      await page.evaluate(async slide => {
+        window.go?.(slide - 1, { animate: false, force: true });
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        window.__finishEditablePptxAnimations?.(document);
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }, sample.slide);
+      const activeSlide = await page.$('#deck > .slide.active, #deck > .slide[data-deck-active]');
+      if (activeSlide) await activeSlide.screenshot({ path: path.join(sampleDir, 'html-slide.png') });
+      if (sample.slide === 79) {
+        posterInfo = await page.evaluate(() => {
+          const slide = document.querySelector('#deck > .slide.active, #deck > .slide[data-deck-active]');
+          const frame = slide?.querySelector('.bt-unicorn-frame');
+          const rule = slide?.querySelector('.pst-rule');
+          const slideRect = slide?.getBoundingClientRect();
+          const frameRect = frame?.getBoundingClientRect();
+          const ruleRect = rule?.getBoundingClientRect();
+          const local = rect => rect && slideRect ? ({
+            x: rect.left - slideRect.left,
+            y: rect.top - slideRect.top,
+            w: rect.width,
+            h: rect.height,
+          }) : null;
+          return {
+            key: slide?.dataset.vmSlideId || slide?.dataset.layoutKey || slide?.id || '',
+            text: (slide?.innerText || '').trim().replace(/\s+/g, ' '),
+            slide: slideRect ? { x: slideRect.left, y: slideRect.top, w: slideRect.width, h: slideRect.height } : null,
+            frame: local(frameRect),
+            rule: local(ruleRect),
+          };
+        });
+        writeFileSync(path.join(sampleDir, 'poster-dom.json'), JSON.stringify(posterInfo, null, 2) + '\n');
+        if (!posterInfo?.rule) failures.push('theme10 poster sample is missing the .pst-rule foreground gradient rule.');
+        const slidePng = path.join(sampleDir, 'html-slide.png');
+        if (posterInfo?.rule && commandAvailable('magick')) {
+          const crop = expandedCropSpec(posterInfo.rule, posterInfo.slide, 18);
+          spawnSync('magick', [slidePng, '-crop', crop, path.join(sampleDir, 'html-rule-crop.png')], { encoding: 'utf8' });
+          await page.evaluate(() => {
+            const rule = document.querySelector('#deck > .slide.active .pst-rule, #deck > .slide[data-deck-active] .pst-rule');
+            window.__theme10RuleStyle = rule?.getAttribute('style') ?? null;
+            rule?.style.setProperty('opacity', '0', 'important');
+          });
+          if (activeSlide) await activeSlide.screenshot({ path: path.join(sampleDir, 'html-slide-rule-hidden.png') });
+          spawnSync('magick', [path.join(sampleDir, 'html-slide-rule-hidden.png'), '-crop', crop, path.join(sampleDir, 'html-rule-hidden-crop.png')], { encoding: 'utf8' });
+          await page.evaluate(() => {
+            const rule = document.querySelector('#deck > .slide.active .pst-rule, #deck > .slide[data-deck-active] .pst-rule');
+            if (!rule) return;
+            if (window.__theme10RuleStyle == null) rule.removeAttribute('style');
+            else rule.setAttribute('style', window.__theme10RuleStyle);
+            delete window.__theme10RuleStyle;
+          });
+        }
+        const mod = await import(pathToFileURL(path.join(ROOT, 'src/export-pptx/editable.mjs')));
+        const pptxFile = path.join(sampleDir, 'poster.pptx');
+        const reportFile = path.join(sampleDir, 'poster-report.json');
+        await mod.exportEditablePptxFromPage(page, {
+          outFile: pptxFile,
+          reportFile,
+          title: 'JAD-64 theme10 poster regression',
+          slideIndexes: [sample.slide - 1],
+        });
+        pptx = inspectPptx(pptxFile);
+        const mediaDir = path.join(sampleDir, 'media');
+        mkdirSync(mediaDir, { recursive: true });
+        spawnSync('unzip', ['-q', '-o', pptxFile, 'ppt/media/*', '-d', mediaDir], { encoding: 'utf8' });
+        media = inspectExtractedMedia(mediaDir);
+        const largest = media.slice().sort((a, b) => (b.width * b.height) - (a.width * a.height))[0];
+        if (largest && posterInfo?.rule && commandAvailable('magick')) {
+          const crop = expandedCropSpec({
+            x: posterInfo.rule.x - (posterInfo.frame?.x || 0),
+            y: posterInfo.rule.y - (posterInfo.frame?.y || 0),
+            w: posterInfo.rule.w,
+            h: posterInfo.rule.h,
+          }, { w: largest.width, h: largest.height }, 18);
+          spawnSync('magick', [largest.file, '-crop', crop, path.join(sampleDir, 'pptx-background-rule-crop.png')], { encoding: 'utf8' });
+        }
+        const narrowRuleMedia = media.filter(item => item.width <= 24 && item.height >= Math.max(140, (posterInfo?.rule?.h || 0) * 0.6));
+        if (narrowRuleMedia.length) {
+          failures.push(`theme10 poster foreground gradient rule is still exported as ${narrowRuleMedia.length} narrow PNG media object(s), not a native PPT shape/line.`);
+        }
+        if (pptx?.fullSlideImageOnlySlides?.length) failures.push(`theme10 poster became full-slide-image-only: ${pptx.fullSlideImageOnlySlides.join(', ')}.`);
+        const allText = normalizeSearchText(pptx?.allText || '');
+        for (const probe of ['时间，是', '最被低估的', '复利']) {
+          if (!allText.includes(normalizeSearchText(probe))) failures.push(`theme10 poster PPTX is missing editable text: ${probe}`);
+        }
+      }
+    }
+  } finally {
+    await closePage(page);
+    await closeBrowser(browser);
+  }
+
+  const result = {
+    mode: 'theme10-user-regressions',
+    passed: failures.length === 0,
+    outDir,
+    rootCauseMatrix: path.join(outDir, 'root-cause-matrix.json'),
+    poster: {
+      dom: posterInfo,
+      pptx: pptx ? summarizeInspection(pptx) : null,
+      media,
+    },
+    samples,
+    failures,
+  };
+  writeFileSync(path.join(outDir, 'theme10-user-regressions.json'), JSON.stringify(result, null, 2) + '\n');
+  if (failures.length) {
+    console.error(JSON.stringify(result, null, 2));
+    process.exit(1);
+  }
+  console.log(JSON.stringify(result, null, 2));
+  process.exit(0);
 }
 
 async function runUiVisualMatrixValidation() {
@@ -2733,6 +2951,44 @@ function inspectPptx(file) {
     fullSlideImageOnlySlides: slides.filter(slide => slide.fullSlideImageOnly).map(slide => slide.index),
     uniqueSlideHashes: hashes.size,
   };
+}
+
+function inspectExtractedMedia(dir) {
+  if (!existsSync(dir)) return [];
+  const files = [];
+  const walk = folder => {
+    for (const name of readdirSync(folder, { withFileTypes: true })) {
+      const file = path.join(folder, name.name);
+      if (name.isDirectory()) walk(file);
+      else if (/\.(png|jpe?g|gif)$/i.test(name.name)) files.push(file);
+    }
+  };
+  walk(dir);
+  return files.map(file => {
+    const identified = commandAvailable('magick')
+      ? spawnSync('magick', ['identify', '-format', '%w %h %[mean]', file], { encoding: 'utf8' })
+      : null;
+    const [width, height, mean] = String(identified?.stdout || '').trim().split(/\s+/).map(Number);
+    return {
+      file,
+      relativePath: path.relative(ROOT, file),
+      width: Number.isFinite(width) ? width : 0,
+      height: Number.isFinite(height) ? height : 0,
+      mean: Number.isFinite(mean) ? mean : null,
+      hash: hashBuffer(readFileSync(file)),
+      size: readFileSync(file).length,
+    };
+  });
+}
+
+function expandedCropSpec(rect, bounds = {}, pad = 0) {
+  const maxW = Number(bounds.w ?? bounds.width ?? Infinity);
+  const maxH = Number(bounds.h ?? bounds.height ?? Infinity);
+  const x = Math.max(0, Math.floor(Number(rect.x || 0) - pad));
+  const y = Math.max(0, Math.floor(Number(rect.y || 0) - pad));
+  const right = Math.min(Number.isFinite(maxW) ? maxW : x + Number(rect.w || 0) + pad * 2, Math.ceil(Number(rect.x || 0) + Number(rect.w || 0) + pad));
+  const bottom = Math.min(Number.isFinite(maxH) ? maxH : y + Number(rect.h || 0) + pad * 2, Math.ceil(Number(rect.y || 0) + Number(rect.h || 0) + pad));
+  return `${Math.max(1, right - x)}x${Math.max(1, bottom - y)}+${x}+${y}`;
 }
 
 function inspectSlideXml(xml, index, relsXml, mediaByEntry) {
