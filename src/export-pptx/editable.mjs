@@ -12,6 +12,7 @@ export async function exportEditablePptxFromPage(page, options = {}) {
   const outFile = path.resolve(options.outFile || 'editable-export.pptx');
   const reportFile = options.reportFile ? path.resolve(options.reportFile) : null;
   const title = options.title || 'Editable Deck Export';
+  await emitProgress(options.onProgress, { stage: 'collecting', detail: '采集页面结构', percent: 14 });
   const deck = await collectEditableDeck(page, options);
 
   const pptx = new PptxGenJS();
@@ -25,7 +26,13 @@ export async function exportEditablePptxFromPage(page, options = {}) {
   const totals = { textObjects: 0, shapeObjects: 0, imageObjects: 0 };
   const slideSummaries = [];
 
-  for (const slideData of deck.slides) {
+  for (let slideIndex = 0; slideIndex < deck.slides.length; slideIndex += 1) {
+    const slideData = deck.slides[slideIndex];
+    await emitProgress(options.onProgress, {
+      stage: 'rendering',
+      detail: `生成 PPTX 对象 ${slideIndex + 1}/${deck.slides.length}`,
+      percent: 68 + Math.round((slideIndex / Math.max(1, deck.slides.length)) * 20),
+    });
     const slide = pptx.addSlide();
     slide.background = { color: 'FFFFFF' };
     const before = { ...totals };
@@ -49,6 +56,7 @@ export async function exportEditablePptxFromPage(page, options = {}) {
   }
 
   mkdirSync(path.dirname(outFile), { recursive: true });
+  await emitProgress(options.onProgress, { stage: 'saving', detail: '保存 PPTX 文件', percent: 92 });
   await pptx.writeFile({ fileName: outFile });
 
   const report = {
@@ -64,6 +72,7 @@ export async function exportEditablePptxFromPage(page, options = {}) {
     mkdirSync(path.dirname(reportFile), { recursive: true });
     writeFileSync(reportFile, JSON.stringify(report, null, 2) + '\n');
   }
+  await emitProgress(options.onProgress, { stage: 'ready', detail: '准备下载文件', percent: 98 });
   return { outFile, reportFile, ...report };
 }
 
@@ -72,14 +81,23 @@ export async function exportEditablePptxFromUrl(browser, url, options = {}) {
   const page = await context.newPage();
   try {
     page.setDefaultTimeout(options.timeout || 45000);
+    await emitProgress(options.onProgress, { stage: 'opening', detail: '打开预览页面', percent: 8 });
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#deck > .slide.active, #deck > .slide[data-deck-active]');
+    await emitProgress(options.onProgress, { stage: 'preparing', detail: '准备导出页面状态', percent: 12 });
     if (options.snapshot) await applyDeckSnapshot(page, options.snapshot);
     return await exportEditablePptxFromPage(page, options);
   } finally {
     await page.close().catch(() => {});
     await context.close().catch(() => {});
   }
+}
+
+async function emitProgress(onProgress, update) {
+  if (typeof onProgress !== 'function') return;
+  try {
+    await onProgress(update);
+  } catch {}
 }
 
 async function applyDeckSnapshot(page, snapshot) {
@@ -174,6 +192,11 @@ async function collectEditableDeck(page, options = {}) {
       : null;
     const indexes = slideIndexes?.length ? slideIndexes : Array.from({ length: count }, (_, index) => index);
     for (const i of indexes) {
+      await emitProgress(options.onProgress, {
+        stage: 'collecting',
+        detail: `采集页面结构 ${i + 1}/${count}`,
+        percent: 16 + Math.round(((indexes.indexOf(i)) / Math.max(1, indexes.length)) * 48),
+      });
       await page.evaluate(async index => {
         window.go?.(index, { animate: false, force: true });
         const slides = window.__getVisibleSlides?.() || [...document.querySelectorAll('#deck > .slide:not([hidden])')];
@@ -217,9 +240,47 @@ async function resolveElementScreenshots(page, root, warnings, options = {}) {
     if (node.elementScreenshot && node.exportId) targets.push(node);
   });
   for (const node of targets) {
+    let hiddenToken = null;
     try {
+      if (node.stripTextForScreenshot) {
+        hiddenToken = await page.evaluate(exportId => {
+          const root = document.querySelector(`[data-editable-pptx-export-id="${exportId}"]`);
+          if (!root) return null;
+          const token = `hide-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          const entries = [];
+          const mark = (el) => {
+            if (!el || entries.some(entry => entry.el === el)) return;
+            entries.push({ el, style: el.getAttribute('style') });
+            el.style.setProperty('color', 'transparent', 'important');
+            el.style.setProperty('-webkit-text-fill-color', 'transparent', 'important');
+            el.style.setProperty('text-shadow', 'none', 'important');
+            el.style.setProperty('text-decoration-color', 'transparent', 'important');
+            el.style.setProperty('fill', 'transparent', 'important');
+            el.style.setProperty('stroke', 'transparent', 'important');
+          };
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+          while (walker.nextNode()) {
+            if ((walker.currentNode.textContent || '').trim()) mark(walker.currentNode.parentElement);
+          }
+          root.querySelectorAll('svg text, text').forEach(mark);
+          window.__editablePptxHiddenTextStyles ||= new Map();
+          window.__editablePptxHiddenTextStyles.set(token, entries);
+          return token;
+        }, node.exportId);
+      }
       const bytes = await page.locator(`[data-editable-pptx-export-id="${node.exportId}"]`).screenshot({ type: 'png' });
       node.imageData = `data:image/png;base64,${bytes.toString('base64')}`;
+      if (hiddenToken) {
+        await page.evaluate(token => {
+          const entries = window.__editablePptxHiddenTextStyles?.get(token) || [];
+          for (const entry of entries) {
+            if (entry.style == null) entry.el.removeAttribute('style');
+            else entry.el.setAttribute('style', entry.style);
+          }
+          window.__editablePptxHiddenTextStyles?.delete(token);
+        }, hiddenToken).catch(() => {});
+        hiddenToken = null;
+      }
       if (!options.freeze) continue;
       await page.evaluate(({ exportId, data }) => {
         const el = document.querySelector(`[data-editable-pptx-export-id="${exportId}"]`);
@@ -240,6 +301,17 @@ async function resolveElementScreenshots(page, root, warnings, options = {}) {
       }, { exportId: node.exportId, data: node.imageData });
     } catch {
       warnings.push({ slide: node.slideIndex, type: 'element-screenshot-failed', tag: node.tag, kind: node.imageKind });
+    } finally {
+      if (hiddenToken) {
+        await page.evaluate(token => {
+          const entries = window.__editablePptxHiddenTextStyles?.get(token) || [];
+          for (const entry of entries) {
+            if (entry.style == null) entry.el.removeAttribute('style');
+            else entry.el.setAttribute('style', entry.style);
+          }
+          window.__editablePptxHiddenTextStyles?.delete(token);
+        }, hiddenToken).catch(() => {});
+      }
     }
   }
 }
@@ -359,6 +431,7 @@ async function installBrowserCollector(page) {
         ${finishEditablePptxAnimations.toString()}
         ${fallbackTextRisk.toString()}
         ${visibleTextInSubtree.toString()}
+        ${collectDomFallbackTextNodes.toString()}
         ${svgTextRisk.toString()}
         ${fetchImageDataUrl.toString()}
         ${normalizeDataImageUrl.toString()}
@@ -686,8 +759,17 @@ async function captureElement(el, slideRect, warnings, depth, slideIndex) {
     node.exportId = exportId;
     node.elementScreenshot = true;
     node.imageKind = 'unicorn-background';
+    const textNodes = collectDomFallbackTextNodes(el, slideRect, slideIndex);
+    if (textNodes.length) {
+      node.stripTextForScreenshot = true;
+      node.children.push(...textNodes);
+    }
     const risk = fallbackTextRisk(el, slideRect);
-    if (risk.count) warnings.push({ slide: slideIndex, type: 'node-image-fallback-text-risk', node: 'unicorn-background', textCount: risk.count, sample: risk.sample });
+    if (risk.count && textNodes.length) {
+      warnings.push({ slide: slideIndex, type: 'node-image-fallback-text-extracted', node: 'unicorn-background', textCount: textNodes.length, sample: risk.sample });
+    } else if (risk.count) {
+      warnings.push({ slide: slideIndex, type: 'node-image-fallback-text-risk', node: 'unicorn-background', textCount: risk.count, sample: risk.sample });
+    }
     warnings.push({ slide: slideIndex, type: 'node-image-fallback', node: 'unicorn-background', count: 1 });
     return node;
   }
@@ -992,7 +1074,7 @@ async function elementImageData(img, src) {
 async function svgElementData(svg, width, height, options = {}) {
   try {
     const clone = cloneSvgWithComputedStyle(svg);
-    if (options.stripText) clone.querySelectorAll('text').forEach(el => el.remove());
+    if (options.stripText) clone.querySelectorAll('text, foreignObject').forEach(el => el.remove());
     clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
     if (!clone.getAttribute('width')) clone.setAttribute('width', String(Math.max(1, Math.round(width))));
     if (!clone.getAttribute('height')) clone.setAttribute('height', String(Math.max(1, Math.round(height))));
@@ -1021,7 +1103,7 @@ async function svgElementData(svg, width, height, options = {}) {
 }
 
 function collectSvgTextNodes(svg, slideRect, slideIndex) {
-  return [...svg.querySelectorAll('text')]
+  const svgTextNodes = [...svg.querySelectorAll('text')]
     .map(el => {
       const text = normalizeText(el.textContent || '');
       if (!text) return null;
@@ -1040,6 +1122,11 @@ function collectSvgTextNodes(svg, slideRect, slideIndex) {
       };
     })
     .filter(Boolean);
+  const foreignTextNodes = [];
+  svg.querySelectorAll('foreignObject').forEach(el => {
+    foreignTextNodes.push(...collectDomFallbackTextNodes(el, slideRect, slideIndex));
+  });
+  return [...svgTextNodes, ...foreignTextNodes];
 }
 
 function cloneSvgWithComputedStyle(svg) {
@@ -1446,8 +1533,26 @@ function visibleTextInSubtree(root, slideRect) {
   return texts;
 }
 
+function collectDomFallbackTextNodes(root, slideRect, slideIndex) {
+  const nodes = [];
+  const walk = (node) => {
+    for (const child of node.childNodes || []) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const parent = child.parentElement;
+        if (!parent || !isVisibleElement(parent, slideRect)) continue;
+        const textNode = captureTextNode(child, parent, slideRect, readStyle(parent), slideIndex);
+        if (textNode) nodes.push(textNode);
+      } else if (child.nodeType === Node.ELEMENT_NODE && isVisibleElement(child, slideRect)) {
+        walk(child);
+      }
+    }
+  };
+  walk(root);
+  return nodes;
+}
+
 function svgTextRisk(svg) {
-  const texts = [...svg.querySelectorAll('text')]
+  const texts = [...svg.querySelectorAll('text, foreignObject')]
     .map(el => normalizeText(el.textContent || ''))
     .filter(Boolean);
   return { count: texts.length, sample: texts.join(' ').slice(0, 160) };

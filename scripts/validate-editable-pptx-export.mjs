@@ -23,6 +23,7 @@ const MATRIX_THEME_PACKS = [
   'theme03',
   ...Array.from({ length: 12 }, (_, index) => `theme${String(index + 1).padStart(2, '0')}`).filter(theme => theme !== 'theme03'),
 ];
+const FALLBACK_TEXT_RISK_THEME_PACKS = MATRIX_THEME_PACKS;
 const EMU_PER_IN = 914400;
 const SAMPLE_TEXT_LAYOUT_ANCHORS = new Map([
   [16, [
@@ -71,9 +72,11 @@ const PPTX_SIGNATURE = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
 const args = new Set(process.argv.slice(2));
 const legacyRed = args.has('--legacy-red');
 const uiExport = args.has('--ui-export');
+const uiExportProgress = args.has('--ui-export-progress');
 const uiVisualFidelity = args.has('--ui-visual-fidelity');
 const uiVisualMatrix = args.has('--ui-visual-matrix');
 const fallbackTextRisk = args.has('--fallback-text-risk');
+const fallbackTextRiskMatrix = args.has('--fallback-text-risk-matrix');
 const cliUrl = getArg('--url');
 const cliThemePack = getArg('--theme-pack');
 const cliSamplesPerTheme = Math.max(DEFAULT_VISUAL_SAMPLE_COUNT, Number(getArg('--samples-per-theme') || DEFAULT_VISUAL_SAMPLE_COUNT));
@@ -89,10 +92,14 @@ if (legacyRed) {
   await runLegacyRedValidation();
 } else if (uiExport) {
   await runUiExportValidation();
+} else if (uiExportProgress) {
+  await runUiExportProgressValidation();
 } else if (uiVisualMatrix) {
   await runUiVisualMatrixValidation();
 } else if (uiVisualFidelity) {
   await runUiVisualFidelityValidation();
+} else if (fallbackTextRiskMatrix) {
+  await runFallbackTextRiskMatrixValidation();
 } else if (fallbackTextRisk) {
   await runFallbackTextRiskValidation();
 } else {
@@ -381,6 +388,103 @@ async function runUiExportValidation() {
   process.exit(0);
 }
 
+async function runUiExportProgressValidation() {
+  if (!cliUrl) throw new Error('Usage: node scripts/validate-editable-pptx-export.mjs --ui-export-progress --url <preview-url>');
+  const url = cliUrl;
+  const browser = await chromium.launch({ headless: true, executablePath: CHROME_PATH });
+  let page;
+  let result = null;
+  let downloadedFile = null;
+  let suggestedFilename = null;
+  const observations = [];
+  try {
+    const context = await browser.newContext({
+      acceptDownloads: true,
+      viewport: { width: 1920, height: 1080 },
+      ignoreHTTPSErrors: true,
+    });
+    page = await context.newPage();
+    page.setDefaultTimeout(120000);
+    page.on('dialog', dialog => dialog.dismiss().catch(() => {}));
+    await page.goto(`${url}${url.includes('?') ? '&' : '?'}ui_export_progress=${Date.now()}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#deck > .slide.active, #deck > .slide[data-deck-active]');
+    await page.click('#preview-export-main');
+
+    const requestPromise = page.waitForRequest(req =>
+      req.method() === 'POST' && new URL(req.url()).pathname === '/api/export-editable-pptx',
+      { timeout: 120000 },
+    );
+    const responsePromise = waitForEditablePptxExportResponse(page, 300000);
+    let responseDone = false;
+    const trackedResponsePromise = responsePromise.finally(() => { responseDone = true; });
+    const downloadPromise = page.waitForEvent('download', { timeout: 300000 })
+      .then(download => ({ download }))
+      .catch(error => ({ error: error.message || String(error) }));
+    await page.click('#preview-export-pptx');
+    await requestPromise;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 6000 && !responseDone) {
+      const text = await page.locator('.deck-export-detail').textContent().catch(() => '');
+      observations.push({
+        elapsedMs: Date.now() - startedAt,
+        text,
+        percent: parseProgressPercent(text),
+      });
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    result = await trackedResponsePromise;
+    const downloadResult = await Promise.race([
+      downloadPromise,
+      new Promise(resolve => setTimeout(() => resolve({ error: 'download-event-timeout-after-export' }), 10000)),
+    ]);
+    if (downloadResult.download) {
+      suggestedFilename = downloadResult.download.suggestedFilename();
+      downloadedFile = path.join(OUT_DIR, 'ui-export-progress-download.pptx');
+      await downloadResult.download.saveAs(downloadedFile);
+    }
+  } finally {
+    await closePage(page);
+    await closeBrowser(browser);
+  }
+
+  const maxPercent = Math.max(0, ...observations.map(item => Number(item.percent || 0)));
+  const distinctDetails = new Set(observations.map(item => String(item.text || '').replace(/\s*·\s*\d+%\s*$/, '').trim()).filter(Boolean));
+  const windowMs = observations.length ? observations.at(-1).elapsedMs - observations[0].elapsedMs : 0;
+  const failures = [];
+  if (!observations.length) failures.push('UI progress validation did not observe the editable PPTX generation phase.');
+  if (windowMs >= 2500 && maxPercent <= 0) {
+    failures.push(`Editable PPTX UI stayed at 0% for ${windowMs}ms after the server export request started.`);
+  }
+  if (windowMs >= 2500 && distinctDetails.size <= 1 && maxPercent <= 0) {
+    failures.push('Editable PPTX UI did not show any server generation stage progress while waiting for the long export request.');
+  }
+  if (!downloadedFile) failures.push('UI progress export did not complete with a browser download.');
+  const resultSummary = {
+    mode: 'ui-export-progress',
+    url,
+    passed: failures.length === 0,
+    serverFile: result?.filePath || null,
+    downloadedFile,
+    suggestedFilename,
+    maxPercent,
+    observedWindowMs: windowMs,
+    distinctDetails: [...distinctDetails],
+    observations,
+    failures,
+  };
+  if (failures.length) {
+    console.error(JSON.stringify(resultSummary, null, 2));
+    process.exit(1);
+  }
+  console.log(JSON.stringify(resultSummary, null, 2));
+  process.exit(0);
+}
+
+function parseProgressPercent(text) {
+  const match = String(text || '').match(/(\d+)\s*%/);
+  return match ? Number(match[1]) : 0;
+}
+
 async function waitForEditablePptxExportResponse(page, timeout) {
   const response = await page.waitForResponse(resp =>
     resp.request().method() === 'POST' && new URL(resp.url()).pathname === '/api/export-editable-pptx',
@@ -392,6 +496,75 @@ async function waitForEditablePptxExportResponse(page, timeout) {
   return result;
 }
 
+async function runFallbackTextRiskMatrixValidation() {
+  if (!cliUrl) throw new Error('Usage: node scripts/validate-editable-pptx-export.mjs --fallback-text-risk-matrix --url <preview-url>');
+  const themes = (getArg('--themes') || FALLBACK_TEXT_RISK_THEME_PACKS.join(','))
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+  const script = fileURLToPath(import.meta.url);
+  const matrixDir = path.join(OUT_DIR, `fallback-text-risk-matrix-${timestampForPath()}`);
+  mkdirSync(matrixDir, { recursive: true });
+  const themeResults = [];
+  for (const theme of themes) {
+    const child = spawnSync(process.execPath, [
+      script,
+      '--fallback-text-risk',
+      '--url',
+      cliUrl,
+      '--theme-pack',
+      theme,
+      '--samples-per-theme',
+      String(cliSamplesPerTheme),
+    ], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      maxBuffer: 120 * 1024 * 1024,
+      timeout: 12 * 60 * 1000,
+      env: { ...process.env, EDITABLE_PPTX_VALIDATION_OUT_DIR: matrixDir },
+    });
+    const parsed = parseJsonProcessOutput(child.stdout, child.stderr);
+    themeResults.push({
+      themePack: theme,
+      passed: child.status === 0 && parsed?.passed === true,
+      status: child.status,
+      expectedSlides: parsed?.expectedSlides || null,
+      selectedRiskCount: parsed?.selectedRiskCount || 0,
+      expectedRiskCount: parsed?.expectedRiskCount || 0,
+      extractedCount: parsed?.extractedCount || 0,
+      riskCount: parsed?.riskCount || 0,
+      evidenceDir: parsed?.evidenceDir || null,
+      reportFile: parsed?.reportFile || null,
+      pptxFile: parsed?.pptxFile || null,
+      failures: parsed?.failures || (child.status === 0 ? [] : ['fallback text risk child validation failed']),
+    });
+    writeFileSync(path.join(matrixDir, 'fallback-text-risk-matrix.partial.json'), JSON.stringify({
+      mode: 'fallback-text-risk-matrix',
+      url: cliUrl,
+      matrixDir,
+      themes: themeResults,
+    }, null, 2) + '\n');
+  }
+  const failures = themeResults.flatMap(theme => theme.passed ? [] : theme.failures.map(failure => `${theme.themePack}: ${failure}`));
+  const result = {
+    mode: 'fallback-text-risk-matrix',
+    url: cliUrl,
+    matrixDir,
+    samplesPerTheme: cliSamplesPerTheme,
+    passed: failures.length === 0,
+    themes: themeResults,
+    failures,
+  };
+  writeFileSync(path.join(matrixDir, 'fallback-text-risk-matrix.json'), JSON.stringify(result, null, 2) + '\n');
+  writeFileSync(path.join(OUT_DIR, 'fallback-text-risk-matrix.json'), JSON.stringify(result, null, 2) + '\n');
+  if (failures.length) {
+    console.error(JSON.stringify(result, null, 2));
+    process.exit(1);
+  }
+  console.log(JSON.stringify(result, null, 2));
+  process.exit(0);
+}
+
 async function runFallbackTextRiskValidation() {
   if (!cliUrl) throw new Error('Usage: node scripts/validate-editable-pptx-export.mjs --fallback-text-risk --url <preview-url> --theme-pack <theme>');
   const themePack = cliThemePack || 'theme03';
@@ -401,6 +574,8 @@ async function runFallbackTextRiskValidation() {
   let reportFile = null;
   let expectedSlides = null;
   let expectedRisks = [];
+  let selectedRisks = [];
+  let evidenceDir = null;
   try {
     const context = await browser.newContext({
       viewport: { width: 1920, height: 1080 },
@@ -422,8 +597,11 @@ async function runFallbackTextRiskValidation() {
     const outDir = path.join(OUT_DIR, `fallback-text-risk-${safePathSegment(themePack)}`);
     rmSync(outDir, { recursive: true, force: true });
     mkdirSync(outDir, { recursive: true });
+    evidenceDir = path.join(outDir, 'evidence');
+    selectedRisks = selectFallbackTextRiskSamples(expectedRisks, cliSamplesPerTheme);
+    await captureFallbackTextRiskEvidence(page, selectedRisks, evidenceDir);
     if (expectedRisks.length) {
-      const slideIndexes = [...new Set(expectedRisks.map(item => item.slide - 1))]
+      const slideIndexes = [...new Set(selectedRisks.map(item => item.slide - 1))]
         .filter(index => Number.isInteger(index) && index >= 0)
         .slice(0, cliSamplesPerTheme);
       const mod = await import(pathToFileURL(path.join(ROOT, 'src/export-pptx/editable.mjs')));
@@ -443,10 +621,14 @@ async function runFallbackTextRiskValidation() {
   const report = reportFile && existsSync(reportFile) ? JSON.parse(readFileSync(reportFile, 'utf8')) : null;
   const risks = (report?.warnings || []).filter(warning => warning?.type === 'node-image-fallback-text-risk');
   const extracted = (report?.warnings || []).filter(warning => warning?.type === 'node-image-fallback-text-extracted');
+  const missingClassifications = selectedRisks.filter(risk => !fallbackRiskWasClassified(risk, [...risks, ...extracted]));
   const failures = [];
   if (expectedRisks.length && !report) failures.push('Fallback text risk validation did not write a report file.');
   if (expectedRisks.length && !risks.length && !extracted.length) {
     failures.push(`${themePack} has ${expectedRisks.length} DOM fallback text candidate(s), but export report did not classify them as extracted or risky.`);
+  }
+  if (missingClassifications.length) {
+    failures.push(`${themePack} has ${missingClassifications.length} selected fallback text candidate(s) that were not classified by the export report.`);
   }
   if (risks.length) failures.push(`${themePack} has ${risks.length} local fallback image(s) that include visible descendant text.`);
   const result = {
@@ -456,10 +638,14 @@ async function runFallbackTextRiskValidation() {
     passed: failures.length === 0,
     pptxFile,
     reportFile,
+    evidenceDir,
     riskCount: risks.length,
     extractedCount: extracted.length,
     expectedRiskCount: expectedRisks.length,
+    selectedRiskCount: selectedRisks.length,
     expectedRisks: expectedRisks.slice(0, 40),
+    selectedRisks,
+    missingClassifications,
     extracted: extracted.slice(0, 40),
     risks: risks.slice(0, 40),
     failures,
@@ -620,7 +806,7 @@ async function collectFallbackTextRiskExpectations(page, expectedSlides) {
           && rect.bottom >= slideRect.top && rect.top <= slideRect.bottom;
       };
       const visibleText = (root) => {
-        const texts = [];
+        const texts = new Set();
         const walk = (node) => {
           for (const child of node.childNodes || []) {
             if (child.nodeType === Node.TEXT_NODE) {
@@ -630,23 +816,30 @@ async function collectFallbackTextRiskExpectations(page, expectedSlides) {
               range.selectNodeContents(child);
               const rect = range.getBoundingClientRect();
               range.detach?.();
-              if (rect.width > 1 && rect.height > 1) texts.push(text);
+              if (rect.width > 1 && rect.height > 1) texts.add(text);
             } else if (child.nodeType === Node.ELEMENT_NODE && isVisible(child)) {
               walk(child);
             }
           }
         };
         walk(root);
-        return texts;
+        return [...texts];
       };
       const addRisk = (el, kind, texts) => {
         if (!texts.length) return;
+        const rect = el.getBoundingClientRect();
         out.push({
           slide: index + 1,
           key: slide.dataset.vmSlideId || slide.dataset.layoutKey || slide.id || '',
           kind,
           textCount: texts.length,
           sample: texts.join(' ').slice(0, 120),
+          rect: {
+            x: Math.max(0, rect.left - slideRect.left),
+            y: Math.max(0, rect.top - slideRect.top),
+            w: Math.max(1, Math.min(rect.right, slideRect.right) - Math.max(rect.left, slideRect.left)),
+            h: Math.max(1, Math.min(rect.bottom, slideRect.bottom) - Math.max(rect.top, slideRect.top)),
+          },
         });
       };
       slide.querySelectorAll('.bt-unicorn-frame').forEach(el => {
@@ -663,6 +856,61 @@ async function collectFallbackTextRiskExpectations(page, expectedSlides) {
     }, i));
   }
   return risks;
+}
+
+function selectFallbackTextRiskSamples(expectedRisks, limit) {
+  const bySlide = [];
+  const seen = new Set();
+  const ordered = [...expectedRisks].sort((a, b) => fallbackRiskPriority(b) - fallbackRiskPriority(a));
+  for (const risk of ordered) {
+    const key = `${risk.slide}:${risk.kind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    bySlide.push(risk);
+    if (bySlide.length >= limit) break;
+  }
+  return bySlide;
+}
+
+function fallbackRiskPriority(risk) {
+  if (risk.kind === 'unicorn-background') return 100;
+  if (risk.kind === 'canvas') return 80;
+  if (risk.kind === 'svg-text') return 60;
+  return 40;
+}
+
+async function captureFallbackTextRiskEvidence(page, risks, evidenceDir) {
+  if (!risks.length) return;
+  mkdirSync(evidenceDir, { recursive: true });
+  for (const risk of risks) {
+    const sampleDir = path.join(evidenceDir, `slide-${String(risk.slide).padStart(3, '0')}-${safePathSegment(risk.kind)}`);
+    mkdirSync(sampleDir, { recursive: true });
+    const htmlSlide = path.join(sampleDir, 'html-slide.png');
+    const htmlFallback = path.join(sampleDir, 'html-fallback-region.png');
+    await page.evaluate(async slideIndex => {
+      window.go?.(slideIndex - 1, { animate: false, force: true });
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      window.__finishEditablePptxAnimations?.(document);
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    }, risk.slide);
+    const activeSlide = await page.$('#deck > .slide.active, #deck > .slide[data-deck-active]');
+    if (!activeSlide) continue;
+    await activeSlide.screenshot({ path: htmlSlide });
+    if (risk.rect && commandAvailable('magick')) {
+      const crop = `${Math.max(1, Math.round(risk.rect.w))}x${Math.max(1, Math.round(risk.rect.h))}+${Math.max(0, Math.round(risk.rect.x))}+${Math.max(0, Math.round(risk.rect.y))}`;
+      spawnSync('magick', [htmlSlide, '-crop', crop, htmlFallback], { encoding: 'utf8' });
+    }
+    writeFileSync(path.join(sampleDir, 'risk.json'), JSON.stringify(risk, null, 2) + '\n');
+  }
+}
+
+function fallbackRiskWasClassified(risk, warnings) {
+  return warnings.some(warning => {
+    if (Number(warning?.slide) !== Number(risk.slide)) return false;
+    if (risk.kind === 'svg-text') return warning.node === 'svg';
+    if (risk.kind === 'unicorn-background') return warning.node === 'unicorn-background';
+    return warning.node === risk.kind;
+  });
 }
 
 async function collectSampleVisualComparisons(page, expectations, visualDir) {
