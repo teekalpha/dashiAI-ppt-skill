@@ -58,6 +58,7 @@
 |   |-- validate-goal-spec.mjs - 本地命令脚本。
 |   |-- validate-layout-showcase.mjs - 本地命令脚本。
 |   |-- validate-overview-performance.mjs - 本地命令脚本。
+|   |-- validate-page-transitions.mjs - 本地命令脚本。
 |   |-- validate-pdf-export.mjs - 本地命令脚本。
 |   |-- validate-skill-media-workflow.mjs - 本地命令脚本。
 |   |-- validate-skill-name.mjs - 本地命令脚本。
