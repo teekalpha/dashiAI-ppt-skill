@@ -243,22 +243,12 @@ async function resolveElementScreenshots(page, root, warnings, options = {}) {
     let hiddenToken = null;
     try {
       if (node.stripTextForScreenshot || node.stripOverlayForScreenshot) {
-        hiddenToken = await page.evaluate(({ exportId, mode, stripText, stripOverlay, screenshotRect }) => {
+        hiddenToken = await page.evaluate(({ exportId, mode, stripText, stripOverlay }) => {
           const root = document.querySelector(`[data-editable-pptx-export-id="${exportId}"]`);
           if (!root) return null;
           const token = `hide-${Date.now()}-${Math.random().toString(36).slice(2)}`;
           const entries = [];
-          const sourceRect = root.getBoundingClientRect();
-          const rootRect = screenshotRect
-            ? {
-              left: Number(screenshotRect.x || 0),
-              top: Number(screenshotRect.y || 0),
-              right: Number(screenshotRect.x || 0) + Number(screenshotRect.w || screenshotRect.width || 0),
-              bottom: Number(screenshotRect.y || 0) + Number(screenshotRect.h || screenshotRect.height || 0),
-              width: Number(screenshotRect.w || screenshotRect.width || 0),
-              height: Number(screenshotRect.h || screenshotRect.height || 0),
-            }
-            : sourceRect;
+          const rootRect = root.getBoundingClientRect();
           const slide = mode === 'screenshot-rect'
             ? root.closest('#deck > .slide') || document.querySelector('#deck > .slide.active, #deck > .slide[data-deck-active]')
             : root;
@@ -357,15 +347,12 @@ async function resolveElementScreenshots(page, root, warnings, options = {}) {
           return token;
         }, {
           exportId: node.exportId,
-          mode: node.imageKind === 'unicorn-background' || node.imageKind === 'material-background' || node.screenshotRect ? 'screenshot-rect' : 'descendant',
+          mode: node.imageKind === 'unicorn-background' ? 'screenshot-rect' : 'descendant',
           stripText: Boolean(node.stripTextForScreenshot),
           stripOverlay: Boolean(node.stripOverlayForScreenshot),
-          screenshotRect: node.screenshotRect || null,
         });
       }
-      const bytes = node.screenshotRect
-        ? await page.screenshot({ type: 'png', clip: screenshotClip(node.screenshotRect) })
-        : await page.locator(`[data-editable-pptx-export-id="${node.exportId}"]`).screenshot({ type: 'png' });
+      const bytes = await page.locator(`[data-editable-pptx-export-id="${node.exportId}"]`).screenshot({ type: 'png' });
       node.imageData = `data:image/png;base64,${bytes.toString('base64')}`;
       if (hiddenToken) {
         await page.evaluate(token => {
@@ -516,6 +503,9 @@ async function installBrowserCollector(page) {
         ${shadowOutsetPx.toString()}
         ${splitShadowLayers.toString()}
         ${shouldUseLocalMaterialFallback.toString()}
+        ${hasOnlyInlineTextChildren.toString()}
+        ${isInlineTextOnlyElement.toString()}
+        ${shouldSkipDecorativeGradientFallback.toString()}
         ${transparentCssPaint.toString()}
         ${hasTextPaintSource.toString()}
         ${readStyle.toString()}
@@ -601,6 +591,10 @@ function renderBox(slide, node, slideRect, warnings, totals) {
   const c = coords(node, slideRect);
   if (c.w < 0.003 || c.h < 0.003) return;
   const style = node.style || {};
+  if (shouldSkipNativeDecorativeBlurBox(node, c, style)) {
+    warnings.push({ slide: node.slideIndex, type: 'decorative-blur-shape-skipped', tag: node.tag });
+    return;
+  }
   const borderTriangle = cssBorderTriangle(style, c);
   const hasLocalBackgroundImage = node.backgroundImageData || node.patternImageData;
   const polygonPoints = borderTriangle?.points || cssClipPolygonPoints(style.clipPath, c);
@@ -669,6 +663,25 @@ function isTinyRotatedBorderOnlyPseudo(node, c, hasFill, hasBorder, rotate) {
     && rotate
     && Math.max(c.w, c.h) < 0.35
     && Math.min(c.w, c.h) < 0.18;
+}
+
+function shouldSkipNativeDecorativeBlurBox(node, c, style) {
+  if (!String(style?.filter || '').includes('blur(')) return false;
+  if (nodeHasTextDescendant(node)) return false;
+  if ((node.children || []).some(child => child.tag && child.tag !== '#text')) return false;
+  const areaRatio = c.w * c.h / (PPT_W * PPT_H);
+  if (areaRatio < 0.08) return false;
+  const backgroundImage = String(style.backgroundImage || '');
+  const hasPaint = !transparentCssPaint(style.backgroundColor)
+    || (backgroundImage && backgroundImage !== 'none')
+    || (style.boxShadow && style.boxShadow !== 'none');
+  return Boolean(hasPaint);
+}
+
+function nodeHasTextDescendant(node) {
+  if (node.tag === '#text' && normalizeText(node.text || '')) return true;
+  if (node.text && normalizeText(node.text)) return true;
+  return (node.children || []).some(child => nodeHasTextDescendant(child));
 }
 
 function renderBorders(slide, c, borders, slideRect, opacity, totals) {
@@ -1014,22 +1027,16 @@ async function captureElement(el, slideRect, warnings, depth, slideIndex) {
   }
   if (tag === 'svg') {
     const svgTexts = collectSvgTextNodes(el, slideRect, slideIndex);
-    const visualRect = svgVisualRect(el, clipped, slideRect);
-    node.rect = rectObject(visualRect);
-    node.screenshotRect = rectObject(visualRect);
-    const exportId = `editable-pptx-${slideIndex}-${depth}-${Math.random().toString(36).slice(2, 9)}`;
-    el.setAttribute('data-editable-pptx-export-id', exportId);
-    node.exportId = exportId;
-    node.elementScreenshot = true;
+    node.imageData = await svgElementData(el, clipped.width, clipped.height, { stripText: svgTexts.length > 0 });
     node.imageKind = 'svg';
-    node.stripTextForScreenshot = svgTexts.length > 0;
     const risk = svgTextRisk(el);
     if (risk.count && svgTexts.length) {
       warnings.push({ slide: slideIndex, type: 'node-image-fallback-text-extracted', node: 'svg', textCount: svgTexts.length, sample: risk.sample });
     } else if (risk.count) {
       warnings.push({ slide: slideIndex, type: 'node-image-fallback-text-risk', node: 'svg', textCount: risk.count, sample: risk.sample });
     }
-    warnings.push({ slide: slideIndex, type: 'node-image-fallback', node: 'svg', count: 1, source: 'browser-visual-bbox' });
+    if (node.imageData) warnings.push({ slide: slideIndex, type: 'node-image-fallback', node: 'svg', count: 1 });
+    else warnings.push({ slide: slideIndex, type: 'svg-skipped', reason: 'rasterize-failed' });
     node.children.push(...svgTexts);
     return node;
   }
@@ -1056,7 +1063,7 @@ async function captureElement(el, slideRect, warnings, depth, slideIndex) {
   } else if (String(style.backgroundImage || '').includes('repeating-linear-gradient')) {
     node.patternImageData = patternBackgroundImageData(style.backgroundImage, clipped.width, clipped.height, maxCssRadius(style, clipped.width, clipped.height));
     if (node.patternImageData) warnings.push({ slide: slideIndex, type: 'node-image-fallback', node: 'css-pattern-background', count: 1 });
-  } else if (!isTextClippedBackground(style) && String(style.backgroundImage || '').includes('gradient') && !shouldUseNativeGradientShape(style, clipped.width, clipped.height) && !shouldUseNativeGradientShape(style, (el.offsetWidth || clipped.width) * (slideRect.w || 1920) / 1920, (el.offsetHeight || clipped.height) * (slideRect.h || 1080) / 1080) && !String(style.clipPath || '').includes('polygon(')) {
+  } else if (!isTextClippedBackground(style) && String(style.backgroundImage || '').includes('gradient') && !shouldSkipDecorativeGradientFallback(el, style, clipped, slideRect) && !shouldUseNativeGradientShape(style, clipped.width, clipped.height) && !shouldUseNativeGradientShape(style, (el.offsetWidth || clipped.width) * (slideRect.w || 1920) / 1920, (el.offsetHeight || clipped.height) * (slideRect.h || 1080) / 1080) && !String(style.clipPath || '').includes('polygon(')) {
     node.backgroundImageData = gradientBackgroundImageData(style.backgroundImage, clipped.width, clipped.height, maxCssRadius(style, clipped.width, clipped.height));
     if (node.backgroundImageData) warnings.push({ slide: slideIndex, type: 'node-image-fallback', node: 'css-gradient-background', count: 1 });
   }
@@ -1462,19 +1469,62 @@ function splitShadowLayers(value) {
 function shouldUseLocalMaterialFallback(el, style, clipped, slideRect) {
   if (isTextClippedBackground(style) || String(style.clipPath || '').includes('polygon(')) return false;
   const tag = el.tagName.toLowerCase();
-  if (['section', 'main', 'article'].includes(tag) && clipped.width * clipped.height > slideRect.w * slideRect.h * 0.28) return false;
+  if (['section', 'main', 'article', 'svg', 'canvas', 'img', 'video'].includes(tag)) return false;
+  if (/^h[1-6]$/.test(tag) || ['p', 'li', 'td', 'th', 'blockquote'].includes(tag)) return false;
+  if (el.querySelector?.('svg, canvas, img, video')) return false;
+  const visibleChildren = [...(el.children || [])].filter(child => {
+    const childStyle = getComputedStyle(child);
+    const rect = child.getBoundingClientRect();
+    return childStyle.display !== 'none'
+      && childStyle.visibility !== 'hidden'
+      && Number(childStyle.opacity || 1) > 0.01
+      && rect.width > 2
+      && rect.height > 2;
+  });
+  if (visibleChildren.length && !hasOnlyInlineTextChildren(el)) return false;
   const background = String(style.backgroundImage || '');
   if (!background.includes('gradient') && !background.includes('url(')) return false;
   if (backgroundUrl(background)) return false;
   if (shouldUseNativeGradientShape(style, clipped.width, clipped.height)) return false;
   const areaRatio = clipped.width * clipped.height / Math.max(1, slideRect.w * slideRect.h);
-  if (areaRatio <= 0.0002 || areaRatio > 0.42) return false;
+  if (areaRatio <= 0.0002 || areaRatio > 0.12) return false;
   const hasDepth = (style.boxShadow && style.boxShadow !== 'none')
     || (style.filter && style.filter !== 'none')
     || (style.mixBlendMode && style.mixBlendMode !== 'normal')
     || maxCssRadius(style, clipped.width, clipped.height) >= 10
     || splitCssLayers(background).filter(layer => layer.includes('gradient')).length > 1;
   return Boolean(hasDepth);
+}
+
+function hasOnlyInlineTextChildren(el) {
+  return [...(el.children || [])].every(child => isInlineTextOnlyElement(child));
+}
+
+function isInlineTextOnlyElement(el) {
+  if (!isInlineTextChild(el)) return false;
+  if (el.querySelector?.('svg, canvas, img, video')) return false;
+  return [...(el.children || [])].every(child => isInlineTextOnlyElement(child));
+}
+
+function shouldSkipDecorativeGradientFallback(el, style, clipped, slideRect) {
+  const background = String(style.backgroundImage || '');
+  if (!background.includes('gradient')) return false;
+  const areaRatio = clipped.width * clipped.height / Math.max(1, slideRect.w * slideRect.h);
+  if (areaRatio <= 0.18) return false;
+  if ((el.innerText || '').trim()) return false;
+  const visibleChildren = [...(el.children || [])].filter(child => {
+    const childStyle = getComputedStyle(child);
+    const rect = child.getBoundingClientRect();
+    return childStyle.display !== 'none'
+      && childStyle.visibility !== 'hidden'
+      && Number(childStyle.opacity || 1) > 0.01
+      && rect.width > 2
+      && rect.height > 2;
+  });
+  if (visibleChildren.length) return false;
+  return String(style.filter || '').includes('blur(')
+    || background.includes('radial-gradient')
+    || Number(style.opacity || 1) < 0.9;
 }
 
 function transparentCssPaint(value) {
@@ -1571,8 +1621,8 @@ async function svgElementData(svg, width, height, options = {}) {
     const clone = cloneSvgWithComputedStyle(svg);
     if (options.stripText) clone.querySelectorAll('text, foreignObject').forEach(el => el.remove());
     clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-    if (!clone.getAttribute('width')) clone.setAttribute('width', String(Math.max(1, Math.round(width))));
-    if (!clone.getAttribute('height')) clone.setAttribute('height', String(Math.max(1, Math.round(height))));
+    clone.setAttribute('width', String(Math.max(1, Math.round(width))));
+    clone.setAttribute('height', String(Math.max(1, Math.round(height))));
     const xml = new XMLSerializer().serializeToString(clone);
     const blob = new Blob([xml], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(blob);

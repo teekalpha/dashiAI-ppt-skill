@@ -84,8 +84,10 @@ const theme10UserRegressions = args.has('--theme10-user-regressions');
 const jad64FollowupRegressions = args.has('--jad64-followup-regressions');
 const jad64AcceptanceRegressions = args.has('--jad64-acceptance-regressions');
 const jad64RootCauseRegressions = args.has('--jad64-root-cause-regressions');
+const jad64Random30Regressions = args.has('--jad64-random30-regressions');
 const cliUrl = getArg('--url');
 const cliThemePack = getArg('--theme-pack');
+const cliSelectionSummary = getArg('--selection-summary') || '/Users/jadon7/Downloads/theme-30-random-pptx-export-20260618T033406/selection-summary.json';
 const cliSamplesPerTheme = Math.max(DEFAULT_VISUAL_SAMPLE_COUNT, Number(getArg('--samples-per-theme') || DEFAULT_VISUAL_SAMPLE_COUNT));
 
 if (!existsSync(CHROME_PATH)) {
@@ -117,10 +119,193 @@ if (legacyRed) {
   await runJad64AcceptanceRegressionValidation();
 } else if (jad64RootCauseRegressions) {
   await runJad64RootCauseRegressionValidation();
+} else if (jad64Random30Regressions) {
+  await runJad64Random30RegressionValidation();
 } else if (theme10UserRegressions) {
   await runTheme10UserRegressionValidation();
 } else {
   await runEditableExportValidation();
+}
+
+async function runJad64Random30RegressionValidation() {
+  if (!cliUrl) throw new Error('Usage: node scripts/validate-editable-pptx-export.mjs --jad64-random30-regressions --url <preview-url> [--selection-summary <path>]');
+  if (!existsSync(cliSelectionSummary)) throw new Error(`Missing selection summary: ${cliSelectionSummary}`);
+  const outDir = path.join(OUT_DIR, 'jad64-random30-regressions');
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  const selection = JSON.parse(readFileSync(cliSelectionSummary, 'utf8'));
+  const sampleSpecs = [
+    {
+      id: 'theme11-cover-ui-clip',
+      themePack: 'theme11',
+      key: 'theme11_page001',
+      coverage: 'fallback screenshots must not capture slide thumbnails or UI-like panels into the slide',
+      screenshot: '/Users/jadon7/Library/Application Support/CleanShot/media/media_RwKcG7MQdg/CleanShot 2026-06-18 at 11.46.27@2x.png',
+      maxRmse: 0.22,
+      maxDiffRatio: 0.24,
+      maxLeftStripDiffRatio: 0.18,
+      maxLargeRasterArea: 0.42,
+    },
+    {
+      id: 'theme11-stacked-chart-layering',
+      themePack: 'theme11',
+      key: 'theme11_page039',
+      coverage: 'chart/local fallback layers must not duplicate or overpaint stacked chart content',
+      screenshot: '/Users/jadon7/Library/Application Support/CleanShot/media/media_MWenjWMDd1/CleanShot 2026-06-18 at 11.47.33@2x.png',
+      maxRmse: 0.23,
+      maxDiffRatio: 0.22,
+      maxLargeRasterArea: 0.50,
+    },
+    {
+      id: 'theme11-halfscreen-overlay',
+      themePack: 'theme11',
+      key: 'theme11_page075',
+      coverage: 'large translucent fallback overlays must not cover half the slide',
+      screenshot: '/Users/jadon7/Library/Application Support/CleanShot/media/media_S8dOy496Gl/CleanShot 2026-06-18 at 11.48.23@2x.png',
+      maxRmse: 0.22,
+      maxDiffRatio: 0.24,
+      maxLeftStripDiffRatio: 0.18,
+      maxLargeRasterArea: 0.42,
+    },
+    {
+      id: 'theme10-risk-profile-loss',
+      themePack: 'theme10',
+      key: 'theme10_page008',
+      coverage: 'previously-good theme10 geometry/text must not lose visible elements',
+      screenshot: '/Users/jadon7/Library/Application Support/CleanShot/media/media_pyKRjzo48O/CleanShot 2026-06-18 at 11.48.44@2x.png',
+      maxRmse: 0.20,
+      maxDiffRatio: 0.18,
+      minTextCount: 8,
+    },
+    {
+      id: 'theme09-cover-text-baked-into-background',
+      themePack: 'theme09',
+      key: 'theme09_page002',
+      coverage: 'background/material fallback must not bake editable title text into a raster image',
+      screenshot: '/Users/jadon7/Library/Application Support/CleanShot/media/media_8WLR5lIE0X/CleanShot 2026-06-18 at 11.49.47@2x.png',
+      maxRmse: 0.22,
+      maxDiffRatio: 0.32,
+      maxLargeRasterArea: 0.55,
+      minTextCount: 8,
+      textProbes: ['美国大额融资', 'AI 公司', '调研报告'],
+    },
+    {
+      id: 'theme09-chart-black-block',
+      themePack: 'theme09',
+      key: 'theme09_page017',
+      coverage: 'chart fallback must not create black blocks or misplaced local raster layers',
+      screenshot: '/Users/jadon7/Library/Application Support/CleanShot/media/media_N3kjh8z7g7/CleanShot 2026-06-18 at 11.50.36@2x.png',
+      maxRmse: 0.22,
+      maxDiffRatio: 0.20,
+      maxLargeRasterArea: 0.45,
+    },
+  ];
+  const samples = resolveRandom30Samples(selection, sampleSpecs);
+  writeFileSync(path.join(outDir, 'sample-selection.json'), JSON.stringify({ selectionSummary: cliSelectionSummary, samples }, null, 2) + '\n');
+
+  const browser = await chromium.launch({ headless: true, executablePath: CHROME_PATH });
+  let context;
+  let page;
+  const mod = await import(pathToFileURL(path.join(ROOT, 'src/export-pptx/editable.mjs')));
+  const results = [];
+  const failures = [];
+  try {
+    context = await browser.newContext({ viewport: { width: 1920, height: 1080 }, ignoreHTTPSErrors: true });
+    page = await context.newPage();
+    page.setDefaultTimeout(180000);
+    await page.goto(`${cliUrl}${cliUrl.includes('?') ? '&' : '?'}jad64_random30=${Date.now()}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#deck > .slide.active, #deck > .slide[data-deck-active]');
+    await installValidationHelpers(page);
+    for (const sample of samples) {
+      const sampleDir = path.join(outDir, sample.id);
+      mkdirSync(sampleDir, { recursive: true });
+      const nav = await navigateValidationSample(page, sample);
+      if (!nav.found) {
+        const message = `${sample.id} could not find ${sample.key} in ${sample.themePack}; available keys: ${nav.availableKeys.slice(0, 10).join(', ')}`;
+        failures.push(message);
+        results.push({ ...sample, found: false, failures: [message] });
+        continue;
+      }
+      const activeSlide = await page.$('#deck > .slide.active, #deck > .slide[data-deck-active]');
+      const htmlScreenshot = path.join(sampleDir, 'html-slide.png');
+      if (activeSlide) await activeSlide.screenshot({ path: htmlScreenshot });
+      const dom = await collectRandom30DomProbe(page, sample);
+      writeFileSync(path.join(sampleDir, 'dom-probe.json'), JSON.stringify(dom, null, 2) + '\n');
+      const pptxFile = path.join(sampleDir, `${sample.id}.pptx`);
+      const reportFile = path.join(sampleDir, `${sample.id}-report.json`);
+      const exportResult = await mod.exportEditablePptxFromPage(page, {
+        outFile: pptxFile,
+        reportFile,
+        title: `JAD-64 random30 regression ${sample.id}`,
+        slideIndexes: [nav.index],
+      });
+      const pptx = inspectPptx(pptxFile);
+      const mediaDir = path.join(sampleDir, 'media');
+      mkdirSync(mediaDir, { recursive: true });
+      spawnSync('unzip', ['-q', '-o', pptxFile, 'ppt/media/*', '-d', mediaDir], { encoding: 'utf8' });
+      const media = inspectExtractedMedia(mediaDir);
+      const visual = runQuickLookVisualComparison(pptxFile, htmlScreenshot, sampleDir);
+      const pairImage = createSamplePairImage(sample, visual, sampleDir);
+      const diffStats = analyzeRenderedDiff(visual, sampleDir);
+      const mediaStats = analyzeSampleRasterFallbacks(pptx, media);
+      const checks = validateRandom30Sample(sample, { dom, pptx, visual, diffStats, mediaStats, exportResult });
+      failures.push(...checks.failures);
+      if (sample.screenshot && existsSync(sample.screenshot) && pairImage && commandAvailable('magick')) {
+        spawnSync('magick', [
+          sample.screenshot,
+          '-resize',
+          '640x360>',
+          pairImage,
+          '-resize',
+          '960x540!',
+          '-append',
+          path.join(sampleDir, 'user-failure-vs-current-render.png'),
+        ], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+      }
+      results.push({
+        ...sample,
+        found: true,
+        index: nav.index,
+        htmlScreenshot,
+        pptxFile,
+        reportFile,
+        pairImage,
+        userFailureVsCurrentRender: sample.screenshot ? path.join(sampleDir, 'user-failure-vs-current-render.png') : null,
+        dom,
+        pptx: summarizeInspection(pptx),
+        quickLook: visual,
+        diffStats,
+        mediaStats,
+        exportSummary: {
+          slideCount: exportResult.slideCount,
+          textObjects: exportResult.textObjects,
+          shapeObjects: exportResult.shapeObjects,
+          imageObjects: exportResult.imageObjects,
+          warningCount: exportResult.warnings?.length || 0,
+          fallbackWarnings: (exportResult.warnings || []).filter(warning => warning.type === 'node-image-fallback'),
+        },
+        checks,
+      });
+    }
+  } finally {
+    await page?.close().catch(() => {});
+    await context?.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+  const contactSheet = createSampleContactSheet(results, outDir);
+  const result = {
+    mode: 'jad64-random30-regressions',
+    url: cliUrl,
+    selectionSummary: cliSelectionSummary,
+    outDir,
+    contactSheet,
+    passed: failures.length === 0,
+    samples: results,
+    failures,
+  };
+  writeFileSync(path.join(outDir, 'jad64-random30-regressions.json'), JSON.stringify(result, null, 2) + '\n');
+  console.log(JSON.stringify(result, null, 2));
+  if (failures.length) process.exitCode = 1;
 }
 
 async function runJad64RootCauseRegressionValidation() {
@@ -3282,6 +3467,220 @@ function createSamplePairImage(sample, visual, sampleDir) {
     out,
   ], { encoding: 'utf8' });
   return row.status === 0 ? out : null;
+}
+
+function resolveRandom30Samples(selection, sampleSpecs) {
+  const themes = new Map((selection.themes || []).map(theme => [theme.key, theme]));
+  return sampleSpecs.map(spec => {
+    const theme = themes.get(spec.themePack);
+    const selected = theme?.selectedPages || [];
+    const selectedIndex = selected.findIndex(page => page.key === spec.key);
+    return {
+      ...spec,
+      sourcePackage: selection.outDir || path.dirname(cliSelectionSummary),
+      selectedIndex: selectedIndex >= 0 ? selectedIndex : null,
+      selectedSlideNumber: selectedIndex >= 0 ? selectedIndex + 1 : null,
+      selectedPage: selectedIndex >= 0 ? selected[selectedIndex] : null,
+      selectionMatched: selectedIndex >= 0,
+    };
+  });
+}
+
+async function collectRandom30DomProbe(page, sample) {
+  return await page.evaluate(({ textProbes }) => {
+    const slide = document.querySelector('#deck > .slide.active, #deck > .slide[data-deck-active]');
+    if (!slide) return { key: '', slide: null, text: '', textAnchors: [], materialCandidates: [], svgCount: 0 };
+    const slideRect = slide.getBoundingClientRect();
+    const normalize = value => String(value || '').replace(/[^\p{L}\p{N}%+]+/gu, '').toLowerCase();
+    const isVisible = el => {
+      if (!el) return false;
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && Number(style.opacity || 1) > 0.01
+        && rect.width > 2
+        && rect.height > 2
+        && rect.right > slideRect.left
+        && rect.left < slideRect.right
+        && rect.bottom > slideRect.top
+        && rect.top < slideRect.bottom;
+    };
+    const localRect = rect => ({
+      x: Math.max(0, rect.left - slideRect.left),
+      y: Math.max(0, rect.top - slideRect.top),
+      w: Math.max(1, Math.min(rect.right, slideRect.right) - Math.max(rect.left, slideRect.left)),
+      h: Math.max(1, Math.min(rect.bottom, slideRect.bottom) - Math.max(rect.top, slideRect.top)),
+    });
+    const text = (slide.innerText || '').replace(/\s+/g, ' ').trim();
+    const textAnchors = (textProbes || []).map(probe => {
+      const wanted = normalize(probe);
+      const matches = [];
+      const walker = document.createTreeWalker(slide, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const value = (walker.currentNode.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!value || !normalize(value).includes(wanted)) continue;
+        const range = document.createRange();
+        range.selectNodeContents(walker.currentNode);
+        const rect = range.getBoundingClientRect();
+        range.detach?.();
+        if (rect.width > 1 && rect.height > 1) matches.push({ text: value, rect: localRect(rect) });
+      }
+      return { probe, found: matches.length > 0, matches };
+    });
+    const materialCandidates = [...slide.querySelectorAll('*')]
+      .filter(isVisible)
+      .map(el => {
+        const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        const bg = String(style.backgroundImage || '');
+        const hasMaterial = bg.includes('gradient')
+          || (style.boxShadow && style.boxShadow !== 'none')
+          || (style.filter && style.filter !== 'none')
+          || (style.mixBlendMode && style.mixBlendMode !== 'normal');
+        if (!hasMaterial) return null;
+        const r = localRect(rect);
+        return {
+          tag: el.tagName.toLowerCase(),
+          className: String(el.className || ''),
+          text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+          rect: r,
+          areaRatio: r.w * r.h / Math.max(1, slideRect.width * slideRect.height),
+          backgroundImage: bg.slice(0, 160),
+          boxShadow: String(style.boxShadow || '').slice(0, 160),
+          filter: String(style.filter || ''),
+          childElementCount: el.querySelectorAll('*').length,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.areaRatio - a.areaRatio)
+      .slice(0, 16);
+    return {
+      key: slide.dataset.vmSlideId || slide.dataset.layoutKey || slide.id || '',
+      slide: { w: slideRect.width, h: slideRect.height },
+      text,
+      textAnchors,
+      materialCandidates,
+      svgCount: slide.querySelectorAll('svg').length,
+      imageCount: slide.querySelectorAll('img, canvas, video').length,
+    };
+  }, sample);
+}
+
+function analyzeRenderedDiff(visual, sampleDir) {
+  if (!visual?.available || !existsSync(visual.htmlImage) || !existsSync(visual.pptxImage) || !commandAvailable('magick')) return null;
+  const diffImage = path.join(sampleDir, 'compare', 'diff.png');
+  spawnSync('magick', [visual.htmlImage, visual.pptxImage, '-compose', 'difference', '-composite', diffImage], { encoding: 'utf8' });
+  const left = readNormalizedRgbImage(visual.htmlImage);
+  const right = readNormalizedRgbImage(visual.pptxImage);
+  if (!left || !right || left.width !== right.width || left.height !== right.height) return null;
+  const pixels = Math.min(left.pixels, right.pixels);
+  const width = left.width;
+  const height = left.height;
+  const strips = {
+    left: { changed: 0, total: 0 },
+    right: { changed: 0, total: 0 },
+    center: { changed: 0, total: 0 },
+  };
+  let changed = 0;
+  let strongChanged = 0;
+  let totalDiff = 0;
+  for (let index = 0; index < pixels; index += 1) {
+    const offset = index * 3;
+    const diff = Math.abs(left.buffer[offset] - right.buffer[offset])
+      + Math.abs(left.buffer[offset + 1] - right.buffer[offset + 1])
+      + Math.abs(left.buffer[offset + 2] - right.buffer[offset + 2]);
+    totalDiff += diff / 765;
+    const isChanged = diff > 96;
+    const isStrong = diff > 180;
+    if (isChanged) changed += 1;
+    if (isStrong) strongChanged += 1;
+    const x = index % width;
+    const bucket = x < width * 0.18 ? strips.left : (x > width * 0.82 ? strips.right : strips.center);
+    bucket.total += 1;
+    if (isChanged) bucket.changed += 1;
+  }
+  const ratio = item => item.total ? item.changed / item.total : 0;
+  return {
+    width,
+    height,
+    diffImage: existsSync(diffImage) ? diffImage : null,
+    diffRatio: pixels ? changed / pixels : 0,
+    strongDiffRatio: pixels ? strongChanged / pixels : 0,
+    meanDiff: pixels ? totalDiff / pixels : 0,
+    leftStripDiffRatio: ratio(strips.left),
+    rightStripDiffRatio: ratio(strips.right),
+    centerDiffRatio: ratio(strips.center),
+  };
+}
+
+function readNormalizedRgbImage(file) {
+  if (!file || !existsSync(file) || !commandAvailable('magick')) return null;
+  const identified = spawnSync('magick', ['identify', '-format', '%w %h', file], { encoding: 'utf8' });
+  const [width, height] = String(identified.stdout || '').trim().split(/\s+/).map(Number);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  const raw = spawnSync('magick', [file, '-resize', `${width}x${height}!`, '-depth', '8', 'rgb:-'], { encoding: null, maxBuffer: 128 * 1024 * 1024 });
+  if (raw.status !== 0 || !raw.stdout?.length) return null;
+  return { width, height, buffer: raw.stdout, pixels: Math.min(width * height, Math.floor(raw.stdout.length / 3)) };
+}
+
+function analyzeSampleRasterFallbacks(pptx, media) {
+  const mediaByHash = new Map((media || []).map(item => [item.hash, item]));
+  const pictureRows = (pptx.slides?.[0]?.pictures || []).map((picture, index) => {
+    const hash = pptx.slides?.[0]?.pictureMediaHashes?.[index] || '';
+    const mediaItem = mediaByHash.get(hash);
+    const areaRatio = picture.w * picture.h / (PPT_W * PPT_H);
+    return {
+      index: index + 1,
+      x: picture.x,
+      y: picture.y,
+      w: picture.w,
+      h: picture.h,
+      areaRatio,
+      nearFullSlide: picture.nearFullSlide,
+      hash,
+      mediaWidth: mediaItem?.width || 0,
+      mediaHeight: mediaItem?.height || 0,
+      mediaSize: mediaItem?.size || 0,
+      mediaFile: mediaItem?.file || '',
+    };
+  }).sort((a, b) => b.areaRatio - a.areaRatio);
+  const nonBackgroundPictures = pictureRows.filter(item => !item.nearFullSlide);
+  return {
+    pictureCount: pictureRows.length,
+    largestRasterAreaRatio: pictureRows[0]?.areaRatio || 0,
+    largestNonBackgroundRasterAreaRatio: nonBackgroundPictures[0]?.areaRatio || 0,
+    largeRasterPictures: pictureRows.filter(item => item.areaRatio > 0.18),
+    largeNonBackgroundRasterPictures: nonBackgroundPictures.filter(item => item.areaRatio > 0.18),
+    pictures: pictureRows,
+  };
+}
+
+function validateRandom30Sample(sample, { dom, pptx, visual, diffStats, mediaStats }) {
+  const failures = [];
+  const warnings = [];
+  if (!sample.selectionMatched) failures.push(`${sample.id} is not present in the reviewed random-30 selection summary.`);
+  if (!visual?.available) failures.push(`${sample.id} rendered PPTX comparison unavailable: ${visual?.reason || 'unknown'}.`);
+  if (pptx.fullSlideImageOnlySlides.length) failures.push(`${sample.id} became full-slide-image-only: ${pptx.fullSlideImageOnlySlides.join(', ')}.`);
+  if (Number.isFinite(sample.minTextCount) && pptx.textCount < sample.minTextCount) {
+    failures.push(`${sample.id} exported only ${pptx.textCount} text object(s), expected at least ${sample.minTextCount}.`);
+  }
+  if (visual?.available && Number.isFinite(sample.maxRmse) && visual.normalizedRmse > sample.maxRmse) {
+    failures.push(`${sample.id} Quick Look RMSE ${visual.normalizedRmse.toFixed(4)} exceeds ${sample.maxRmse.toFixed(4)}.`);
+  }
+  if (diffStats && Number.isFinite(sample.maxDiffRatio) && diffStats.diffRatio > sample.maxDiffRatio) {
+    failures.push(`${sample.id} rendered diff coverage ${(diffStats.diffRatio * 100).toFixed(1)}% exceeds ${(sample.maxDiffRatio * 100).toFixed(1)}%.`);
+  }
+  if (diffStats && Number.isFinite(sample.maxLeftStripDiffRatio) && diffStats.leftStripDiffRatio > sample.maxLeftStripDiffRatio) {
+    failures.push(`${sample.id} left-strip diff ${(diffStats.leftStripDiffRatio * 100).toFixed(1)}% exceeds ${(sample.maxLeftStripDiffRatio * 100).toFixed(1)}%, consistent with UI/sidebar capture.`);
+  }
+  if (mediaStats && Number.isFinite(sample.maxLargeRasterArea) && mediaStats.largestNonBackgroundRasterAreaRatio > sample.maxLargeRasterArea) {
+    failures.push(`${sample.id} largest non-background raster fallback covers ${(mediaStats.largestNonBackgroundRasterAreaRatio * 100).toFixed(1)}% of slide, exceeds ${(sample.maxLargeRasterArea * 100).toFixed(1)}%.`);
+  }
+  for (const anchor of dom.textAnchors || []) {
+    if (!anchor.found) warnings.push(`${sample.id} could not find optional DOM text probe "${anchor.probe}".`);
+  }
+  return { passed: failures.length === 0, failures, warnings };
 }
 
 function createSampleContactSheet(samples, visualDir) {
