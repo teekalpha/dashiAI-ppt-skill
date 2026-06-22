@@ -4160,10 +4160,27 @@ refreshRailCatalog();
 
   function normalizePropOptions(options){
     return (options || []).map(item => Array.isArray(item)
-      ? {value:item[0], label:String(item[1] ?? item[0]), image:item[2] || '', color:item[3] || ''}
+      ? (isPaletteOption(item)
+        ? {value:[...item], label:item.join(' / '), image:'', color:paletteSwatchBackground(item)}
+        : {value:item[0], label:String(item[1] ?? item[0]), image:item[2] || '', color:item[3] || ''})
       : item && typeof item === 'object' && 'value' in item
         ? {value:item.value, label:String(item.label ?? item.value), image:item.image || item.src || '', color:item.color || item.swatch || item.hex || item.background || ''}
       : {value:item, label:String(item), image:''});
+  }
+
+  function isPaletteOption(item){
+    return item.length > 1 && item.every(value => /^#[0-9a-f]{3,8}$/i.test(String(value || '')));
+  }
+
+  function paletteSwatchBackground(colors){
+    const count = Math.max(1, colors.length);
+    if(count === 1) return colors[0];
+    const stops = colors.map((color, index) => {
+      const from = index / count * 100;
+      const to = (index + 1) / count * 100;
+      return `${color} ${from}% ${to}%`;
+    });
+    return `linear-gradient(135deg, ${stops.join(', ')})`;
   }
 
   function propSwatchColor(control, item){
@@ -4192,7 +4209,11 @@ refreshRailCatalog();
     if(controlType === 'toggle') return value === true || value === 'true' || value === 1 || value === '1';
     if(controlType === 'range') return Number.isFinite(Number(value)) ? Number(value) : Number(control.min ?? 0);
     if(controlType === 'select' || controlType === 'segment'){
-      const match = normalizePropOptions(control.options).find(item => String(item.value) === String(value));
+      const options = normalizePropOptions(control.options);
+      let match = options.find(item => String(item.value) === String(value));
+      if(!match && control.display === 'color'){
+        match = options.find(item => Array.isArray(item.value) && String(item.value[0]) === String(value));
+      }
       if(match) return match.value;
     }
     if(controlType === 'icons'){
