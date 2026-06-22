@@ -51,9 +51,10 @@ node scripts/check_latest_version.mjs
 <!-- theme-choice-hints:end -->
 - 不使用旧 token、旧主题、旧图片 slot、旧风格分支或旧入场动画控制。
 - 选页先用 `npm run layout:query -- --theme <themePack> --role <role> --limit 8`;需要图片槽时加 `--needs-media`、`--planned-images <n>`、`--provided-images <n>` 或 `--image-gen`。
-- 字段不清楚、对象/数组/count、图片/媒体:运行 `inspect:layout`;写对象、数组、数量或图片 props:运行 `props:safe` 并按 `propShapes` 填 key。
-- 文案长度:大字号字段只写短词/短句;长结论拆到 `subtitle` / `lead` / 列表或换高密度 layout;同页字段长度差异不要过大。
+- 字段不清楚、对象/数组/count、图片/媒体:运行 `inspect:layout`;可一次查多个 layout。写对象、数组、数量或图片 props:运行 `props:safe` 并按 `propShapes` 填 key。
+- 文案长度:按 `inspect:layout` 的 `copyBudgets` 写;`display` / `metric` 字段只写短词、短句或数字。
 - 图片/视频只写 `props.images` / `props.media`。视觉素材任务先问是否预留图片槽;不能默认图片槽为 0。用户同意用 `--planned-images <n>`,用户给图用 `--provided-images <n>`,Codex 环境 image-gen 生成图片前先询问并用 `--image-gen`。
+- 用户提供本地图片/视频先运行 `npm run media:stage -- <ppt-output-dir> <media-file...>`,使用返回的 `relative` 路径;AVIF 会转成浏览器可用格式。
 - 用户提供的图片/视频素材每个最多使用一次。素材用完后,媒体插槽留空或改选无媒体插槽页面;除非用户明确要求,不要重复填充同一素材。
 - 元素出现动画使用 Claude Design 页面组件自带的原生效果。
 - 页面切换动画可以在预览控制面板里调整。
@@ -74,7 +75,7 @@ node scripts/check_latest_version.mjs
 
 1. 提炼用户目标: `title`、`goal`、`audience`、`owner`、页数、内容重点和最终产物格式。
 2. 确认 `themePack`。用户未指定时先询问风格;用户选定后生成 `randomSeed`,例如 `<主题>-<日期>-<3位随机词>`,保证随机选页可复现。
-3. 判断图片意图:无图但需要视觉素材时先问是否预留图片槽;Codex image-gen 先询问。
+3. 判断图片意图:无图但需要视觉素材时先问是否预留图片槽;用户给本地素材先 `media:stage`;Codex image-gen 先询问。
 4. 快路径:用 `layout:query` 选候选;对象/数组/count/图片 props 用 `inspect:layout` + `props:safe`。
 5. 每页只承载一个主要信息角色。无法安全覆盖的页面优先换 layout,不要改样式字段硬凑。
 6. 把 JSON 写入本次工作目录的 `output/<deck-name>/goal.json`;渲染前必须通过 goal spec 校验。
@@ -138,6 +139,7 @@ node scripts/check_latest_version.mjs
 普通生成不要读 `layout-manifest.json`。先用 `layout:query` 输出的候选摘要。只有需要更细契约时,再用 `inspect:layout` 看单页契约:
 
 - `copyKeys`: 可安全改写的文案/数据字段。
+- `copyBudgets`: 文案长度预算;`display` / `metric` 超长会被 goal spec 拦截。
 - `propShapes`: `copyKeys` / 数组字段的内部形状;写 `copy`、`cells`、`items`、`rows` 等对象字段时只使用这里列出的 key。
 - `mediaSlots`: 图片/视频写入字段、count key、默认数量和最大数量。
 - `countBindings`: 数量参数与数组字段的绑定。

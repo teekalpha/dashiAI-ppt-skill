@@ -32,6 +32,7 @@ const tests = [
   ['checked-in goal examples pass goal spec', testCheckedInGoalExamples],
   ['preview panel handles type: images as an image list control', testImagesControl],
   ['control naming stays generic across user and agent contracts', testControlNaming],
+  ['theme12 shared chrome stays deck-neutral', testTheme12SharedChromeNeutral],
 ];
 
 const failures = [];
@@ -98,11 +99,17 @@ function testInspectLayout() {
   assert(result.mediaSlots?.some(slot => slot.field === 'images' && slot.countKey === 'imageSlotCount'), 'missing images media slot');
   assert(result.countBindings?.some(binding => binding.key === 'imageSlotCount'), 'missing imageSlotCount binding');
   assert(result.controlKeys?.includes('images'), 'missing images control key');
+  assert(result.copyBudgets?.title?.density === 'display', 'inspect-layout should expose display copy budget for title');
+  assert(Number(result.copyBudgets?.title?.maxChars) > 0, 'inspect-layout should expose title maxChars');
   assert(JSON.stringify(result).length < 9000, 'inspect-layout output is too large');
 
   const quadrant = runJson('scripts/inspect-layout.mjs', ['theme01_page031']);
   assert(quadrant.propShapes?.quadrants?.[0]?.title === 'string', 'inspect-layout should expose array item shape');
   assert(quadrant.propShapes?.quadrants?.[0]?.chips?.[0] === 'string', 'inspect-layout should expose nested array shape');
+
+  const multi = runJson('scripts/inspect-layout.mjs', ['--layout', 'theme01_page020', '--layout=theme01_page031']);
+  assert(Array.isArray(multi.layouts) && multi.layouts.length === 2, 'inspect-layout should support multiple layouts');
+  assert(multi.layouts[0].layout === 'theme01_page020' && multi.layouts[1].layout === 'theme01_page031', 'inspect-layout multi output should keep requested layouts');
 }
 
 function testWriteSafeProps() {
@@ -186,6 +193,21 @@ function testMediaWorkflow() {
 
   const tmp = mkdtempSync(path.join(tmpdir(), 'dashi-media-goal-'));
   try {
+    const pngPath = path.join(tmp, 'Sample Media.png');
+    const png = new PNG({ width: 1, height: 1 });
+    png.data[0] = 255;
+    png.data[3] = 255;
+    writeFileSync(pngPath, PNG.sync.write(png));
+    const staged = runJson('scripts/stage-media.mjs', [path.join(tmp, 'ppt'), pngPath]);
+    assert(staged.items?.[0]?.relative === 'assets/user-media/sample-media.png', 'media:stage should copy image assets with stable relative paths');
+
+    const avifPath = path.join(tmp, 'sample-media.avif');
+    if (tryCreateAvif(pngPath, avifPath)) {
+      const stagedAvif = runJson('scripts/stage-media.mjs', [path.join(tmp, 'ppt-avif'), avifPath]);
+      assert(stagedAvif.items?.[0]?.convertedFrom === 'avif', 'media:stage should report AVIF conversion');
+      assert(/\.(webp|png)$/.test(stagedAvif.items?.[0]?.relative || ''), 'media:stage should convert AVIF to a browser-safe image');
+    }
+
     expectGoalFailure(tmp, 'needs-visual-no-slot.json', {
       title: 'Needs Visual',
       goal: 'should fail',
@@ -283,7 +305,9 @@ function testSkillPromptGuidance() {
   if (!/不能只在.*进度/.test(skill)) missing.push('progress-only style image warning');
   if (!(/视觉素材任务/.test(skill) && /先问/.test(skill) && /预留图片槽/.test(skill))) missing.push('ask-to-reserve-image-slots rule');
   if (!(/不能默认.*图片 slot.*0/.test(skill) || /不能默认.*图片槽.*0/.test(skill))) missing.push('do-not-default-image-slot-count-to-0 rule');
-  if (!(/大字号字段/.test(skill) && /短词\/短句/.test(skill) && /字段长度差异/.test(skill))) missing.push('large-type copy length guidance');
+  if (!(/文案长度/.test(skill) && /短词/.test(skill) && /短句/.test(skill))) missing.push('copy length guidance');
+  if (!(/copyBudgets/.test(skill) && /display/.test(skill) && /metric/.test(skill))) missing.push('copyBudgets display/metric guidance');
+  if (!(/media:stage/.test(skill) && /relative/.test(skill) && /AVIF/.test(skill))) missing.push('media:stage AVIF relative-path guidance');
   if (!(/图片\/视频素材每个最多使用一次/.test(skill) && /不要重复填充同一素材/.test(skill))) missing.push('provided media one-time-use guidance');
   if (!(/素材用完/.test(skill) && /媒体插槽留空/.test(skill) && /无媒体插槽页面/.test(skill))) missing.push('media exhausted empty-or-no-media guidance');
   if (!skill.includes('--planned-images <n>')) missing.push('planned-images workflow guidance');
@@ -310,6 +334,7 @@ function testSkillPromptGuidance() {
     if (skill.includes(oldName)) missing.push(`old theme name ${oldName}`);
   }
   if (!sync.includes('theme-style-grid.png')) missing.push('sync style grid asset handling');
+  if (!(/copyBudgets/.test(sync) && /media:stage/.test(sync))) missing.push('sync reference copy/media tool guidance');
   if (/THEME_CHOICE_HINTS/.test(sync)) missing.push('hardcoded THEME_CHOICE_HINTS table');
   assert(!missing.length, `Skill prompt guidance missing: ${missing.join(', ')}`);
 }
@@ -616,6 +641,26 @@ function testValidateGoalSpec() {
       slides: [{ layout: 'theme01_page020', props: { title: '<div>自由 HTML</div>' } }],
     }, ['slide 1', 'theme01_page020', 'title', 'HTML']);
 
+    expectGoalFailure(tmp, 'duplicate-media.json', {
+      title: 'Duplicate Media',
+      goal: 'should fail',
+      themePack: 'theme01',
+      slides: [
+        { layout: 'theme01_page020', props: { title: '媒体一', images: ['assets/user-media/a.png'] } },
+        { layout: 'theme01_page020', props: { title: '媒体二', images: ['assets/user-media/a.png'] } },
+      ],
+    }, ['media asset', 'assets/user-media/a.png', 'used 2 times']);
+
+    expectGoalFailure(tmp, 'long-display-copy.json', {
+      title: 'Long Display Copy',
+      goal: 'should fail',
+      themePack: 'theme01',
+      slides: [{
+        layout: 'theme01_page020',
+        props: { title: '这是一个被故意写得非常非常非常非常非常非常非常非常非常长的大标题文案' },
+      }],
+    }, ['display copy', 'too long']);
+
     const validPath = path.join(tmp, 'valid.json');
     writeFileSync(validPath, JSON.stringify({
       title: 'Valid',
@@ -624,6 +669,19 @@ function testValidateGoalSpec() {
       slides: [{ layout: 'theme01_page020', props: { title: '头部案例', images: ['x.png'] } }],
     }, null, 2));
     execFileSync('node', ['scripts/validate-goal-spec.mjs', validPath], { cwd: ROOT, stdio: 'pipe' });
+
+    const explicitReusePath = path.join(tmp, 'explicit-reuse.json');
+    writeFileSync(explicitReusePath, JSON.stringify({
+      title: 'Explicit Reuse',
+      goal: 'should pass when reuse is explicit',
+      themePack: 'theme01',
+      allowMediaReuse: true,
+      slides: [
+        { layout: 'theme01_page020', props: { title: '复用一', images: ['x.png'] } },
+        { layout: 'theme01_page020', props: { title: '复用二', images: ['x.png'] } },
+      ],
+    }, null, 2));
+    execFileSync('node', ['scripts/validate-goal-spec.mjs', explicitReusePath], { cwd: ROOT, stdio: 'pipe' });
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -644,6 +702,13 @@ function testImagesControl() {
     if (!/image-list/.test(src)) process.exit(3);
   `], { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' });
   assert(source === '', 'unexpected template probe output');
+}
+
+function testTheme12SharedChromeNeutral() {
+  const swBase = readFileSync(path.join(ROOT, 'src/components/themes/theme12/source/src/swBase.jsx'), 'utf8');
+  assert(!swBase.includes('声浪 SOUNDWAVE'), 'theme12 shared Bar/Footer should not hardcode SoundWave brand');
+  assert(!swBase.includes('Independent Music OS</div>'), 'theme12 shared Footer should not hardcode music OS footer');
+  assert(swBase.includes('CREATIVE SYSTEM'), 'theme12 shared chrome should keep a neutral default label');
 }
 
 function expectGoalFailure(tmp, name, goal, expectedTerms) {
@@ -776,4 +841,16 @@ function fetchHttpWithRetry(url) {
 
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function tryCreateAvif(source, target) {
+  const commands = [
+    ['magick', [source, target]],
+    ['sips', ['-s', 'format', 'avif', source, '--out', target]],
+  ];
+  for (const [command, args] of commands) {
+    const result = spawnSync(command, args, { encoding: 'utf8' });
+    if (result.status === 0 && existsSync(target)) return true;
+  }
+  return false;
 }

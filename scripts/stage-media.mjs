@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -22,14 +23,13 @@ const items = sourceArgs.map(sourceArg => {
   const ext = path.extname(source).toLowerCase();
   const kind = mediaKindForExt(ext);
   if (!kind) throw new Error(`Unsupported media file type: ${source}`);
-  const name = uniqueName(slugify(path.basename(source, ext)), ext, usedNames);
-  const relative = path.posix.join('assets/user-media', name);
-  fs.copyFileSync(source, path.join(outDir, relative));
+  const prepared = prepareMedia(source, ext, kind, outDir, usedNames);
   return {
     source,
-    relative,
+    relative: prepared.relative,
     kind,
-    mime: mimeForExt(ext),
+    mime: prepared.mime,
+    ...(prepared.convertedFrom ? { convertedFrom: prepared.convertedFrom } : {}),
   };
 });
 
@@ -57,12 +57,57 @@ function slugify(value) {
 }
 
 function mediaKindForExt(ext) {
-  if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'].includes(ext)) return 'image';
+  if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.avif'].includes(ext)) return 'image';
   if (['.mp4', '.webm', '.mov', '.m4v'].includes(ext)) return 'video';
   return null;
 }
 
-function mimeForExt(ext) {
+function prepareMedia(source, ext, kind, outDir, usedNames) {
+  const base = slugify(path.basename(source, ext));
+  if (ext === '.avif') {
+    const converted = convertAvif(source, outDir, base, usedNames);
+    return {
+      ...converted,
+      convertedFrom: 'avif',
+    };
+  }
+  const name = uniqueName(base, ext, usedNames);
+  const relative = path.posix.join('assets/user-media', name);
+  fs.copyFileSync(source, path.join(outDir, relative));
+  return {
+    relative,
+    mime: mimeForExt(ext, kind),
+  };
+}
+
+function convertAvif(source, outDir, base, usedNames) {
+  const attempts = [
+    { ext: '.webp', mime: 'image/webp', command: 'magick', args: target => [source, target] },
+    { ext: '.webp', mime: 'image/webp', command: 'sips', args: target => ['-s', 'format', 'webp', source, '--out', target] },
+    { ext: '.png', mime: 'image/png', command: 'magick', args: target => [source, target] },
+    { ext: '.png', mime: 'image/png', command: 'sips', args: target => ['-s', 'format', 'png', source, '--out', target] },
+  ];
+  const errors = [];
+  for (const attempt of attempts) {
+    const name = uniqueName(base, attempt.ext, usedNames);
+    const relative = path.posix.join('assets/user-media', name);
+    const target = path.join(outDir, relative);
+    const result = spawnSync(attempt.command, attempt.args(target), { encoding: 'utf8' });
+    if (result.status === 0 && fs.existsSync(target)) {
+      return {
+        relative,
+        mime: attempt.mime,
+      };
+    }
+    usedNames.delete(name);
+    fs.rmSync(target, { force: true });
+    const message = `${attempt.command} ${attempt.ext}: ${result.stderr || result.stdout || result.error?.message || `exit ${result.status}`}`;
+    errors.push(message.trim());
+  }
+  throw new Error(`Could not convert AVIF media file: ${source}\n${errors.join('\n')}`);
+}
+
+function mimeForExt(ext, kind = null) {
   return {
     '.png': 'image/png',
     '.jpg': 'image/jpeg',
@@ -74,5 +119,5 @@ function mimeForExt(ext) {
     '.webm': 'video/webm',
     '.mov': 'video/quicktime',
     '.m4v': 'video/mp4',
-  }[ext] || 'application/octet-stream';
+  }[ext] || (kind === 'image' ? 'image/*' : 'application/octet-stream');
 }

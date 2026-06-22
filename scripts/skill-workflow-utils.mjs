@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
   createLayoutContracts,
   describePropShapes,
+  neutralizeDefaultCopy,
   normalizeSlidePropsForContract,
 } from '../src/prop-contract-core.mjs';
 import {
@@ -143,6 +144,7 @@ export function inspectLayout(layout, { compact = false } = {}) {
   const mediaSlots = getMediaSlots(record);
   const copyKeys = getCopyKeys(defaultProps, controls, mediaSlots);
   const arrayKeys = getArrayKeys(defaultProps, mediaSlots);
+  const copyBudgets = getCopyBudgets(defaultProps, copyKeys);
   const defaultVisibleCounts = Object.fromEntries(countBindings
     .map(binding => [binding.publicKey || binding.key, defaultProps[binding.key] ?? controls.find(control => control.key === binding.key)?.default])
     .filter(([, value]) => value !== undefined));
@@ -158,6 +160,7 @@ export function inspectLayout(layout, { compact = false } = {}) {
     slot: page.slot,
     roles: inferRoles(page, mediaSlots),
     copyKeys,
+    copyBudgets,
     arrayKeys,
     mediaSlots,
     countBindings,
@@ -301,6 +304,14 @@ export function getPreferredMediaSlot(layout, { kind = 'images', count = 1 } = {
     || null;
 }
 
+export function getCopyBudgetsForLayout(layout) {
+  const record = getLayoutRecord(layout);
+  if (!record) return {};
+  const mediaSlots = getMediaSlots(record);
+  const copyKeys = getCopyKeys(record.defaultProps, record.controls, mediaSlots);
+  return getCopyBudgets(record.defaultProps, copyKeys);
+}
+
 function mergeDefaultArrayTails(props, defaults, authoredProps = props) {
   const next = { ...(props || {}) };
   for (const [key, value] of Object.entries(props || {})) {
@@ -313,32 +324,6 @@ function mergeDefaultArrayTails(props, defaults, authoredProps = props) {
     ];
   }
   return next;
-}
-
-function neutralizeDefaultCopy(value, field = '') {
-  if (typeof value === 'string') return shouldNeutralizeString(field, value) ? neutralPlaceholder(value) : value;
-  if (Array.isArray(value)) return value.map(item => neutralizeDefaultCopy(item, field));
-  if (!isPlainObject(value)) return value;
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-    key,
-    neutralizeDefaultCopy(item, key),
-  ]));
-}
-
-function shouldNeutralizeString(field, value) {
-  if (!value) return false;
-  if (/^(id|key|type|tone|color|colour|accent|variant|style|theme|layout|align|side|position|icon|href|url|src|fit)$/i.test(field)) return false;
-  if (/^(show|is|has)[A-Z_]/.test(field)) return false;
-  if (/(Color|Colour|Tone|Variant|Style|Mode|Layout|Align|Side|Index|Id|Key|Url|Src|Fit)$/i.test(field)) return false;
-  if (/^(https?:|data:|#)/i.test(value)) return false;
-  return true;
-}
-
-function neutralPlaceholder(value) {
-  const length = Array.from(value).length;
-  if (!length) return value;
-  const seed = Array.from('请输入文本');
-  return Array.from({ length }, (_, index) => seed[index % seed.length]).join('');
 }
 
 export function getLayoutRecord(layout) {
@@ -418,6 +403,63 @@ function getArrayKeys(defaultProps, mediaSlots) {
   return Object.entries(defaultProps || {})
     .filter(([key, value]) => Array.isArray(value) && !mediaFields.has(key) && !isMediaArrayKey(key))
     .map(([key]) => key);
+}
+
+function getCopyBudgets(defaultProps, copyKeys) {
+  const budgets = {};
+  for (const key of copyKeys) {
+    collectCopyBudgets(defaultProps?.[key], key, budgets);
+  }
+  return budgets;
+}
+
+function collectCopyBudgets(value, pathName, budgets) {
+  if (typeof value === 'string' || typeof value === 'number') {
+    setCopyBudget(budgets, pathName, copyBudget(pathName, value));
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.slice(0, 4).forEach(item => collectCopyBudgets(item, `${pathName}[]`, budgets));
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  for (const [key, item] of Object.entries(value)) {
+    collectCopyBudgets(item, `${pathName}.${key}`, budgets);
+  }
+}
+
+function setCopyBudget(budgets, key, budget) {
+  if (!budget) return;
+  const existing = budgets[key];
+  if (!existing || budget.maxChars < existing.maxChars) budgets[key] = budget;
+}
+
+function copyBudget(pathName, value) {
+  const density = inferCopyDensity(pathName);
+  const length = charLength(value);
+  const base = Math.max(length, density === 'body' ? 18 : 6);
+  const maxChars = {
+    metric: Math.max(8, Math.min(16, Math.ceil(base * 1.4))),
+    display: Math.max(18, Math.min(36, Math.ceil(base * 1.8))),
+    compact: Math.max(16, Math.min(42, Math.ceil(base * 1.8))),
+    body: Math.max(36, Math.min(120, Math.ceil(base * 2.2))),
+  }[density];
+  return { density, maxChars };
+}
+
+function inferCopyDensity(pathName) {
+  const normalized = String(pathName || '').toLowerCase();
+  const field = normalized.split('.').at(-1)?.replace(/\[\]/g, '') || normalized;
+  const nested = normalized.includes('.') || normalized.includes('[]');
+  if (/^(value|amount|number|num|score|rate|pct|percent|index|rank|total)$/.test(field)) return 'metric';
+  if (!nested && /^(title|titletop|titlebottom|headline|headlinehl|headlinetail|statement|quote|word|brand|kicker)$/.test(field)) return 'display';
+  if (/^(lead|subtitle|sub|desc|description|summary|body|copy|note|caption|detail|paragraph|footnote)$/.test(field)) return 'body';
+  if (/^(title|headline|label|name|kicker|tag|chip|pill|category)$/.test(field)) return 'compact';
+  return 'compact';
+}
+
+function charLength(value) {
+  return Array.from(String(value ?? '')).length;
 }
 
 function isCopyValue(value) {

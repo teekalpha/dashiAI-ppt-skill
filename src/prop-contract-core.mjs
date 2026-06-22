@@ -144,7 +144,7 @@ function mergeArrayWithDefaultTail(items, defaults) {
   }
   return [
     ...items.map((item, index) => mergeArrayItem(defaults[index], item)),
-    ...defaults.slice(items.length),
+    ...defaults.slice(items.length).map(item => neutralizeDefaultCopy(item)),
   ];
 }
 
@@ -171,6 +171,32 @@ function mergePlainObject(defaultValue, value) {
     }
   }
   return next;
+}
+
+export function neutralizeDefaultCopy(value, field = '') {
+  if (typeof value === 'string') return shouldNeutralizeString(field, value) ? neutralPlaceholder(value) : value;
+  if (Array.isArray(value)) return value.map(item => neutralizeDefaultCopy(item, field));
+  if (!isPlainObject(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    neutralizeDefaultCopy(item, key),
+  ]));
+}
+
+function shouldNeutralizeString(field, value) {
+  if (!value) return false;
+  if (/^(id|key|type|tone|color|colour|accent|variant|style|theme|layout|align|side|position|icon|href|url|src|fit|className)$/i.test(field)) return false;
+  if (/^(show|is|has)[A-Z_]/.test(field)) return false;
+  if (/(Color|Colour|Tone|Variant|Style|Mode|Layout|Align|Side|Index|Id|Key|Url|Src|Fit|ClassName)$/i.test(field)) return false;
+  if (/^(https?:|data:|#)/i.test(value)) return false;
+  return true;
+}
+
+function neutralPlaceholder(value) {
+  const length = Array.from(value).length;
+  if (!length) return value;
+  const seed = Array.from('请输入文本');
+  return Array.from({ length }, (_, index) => seed[index % seed.length]).join('');
 }
 
 function serializeContract(contract) {

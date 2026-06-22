@@ -617,9 +617,9 @@ ${themeHints}
 
 选页先使用 \`npm run layout:query -- --theme <themePack> --role <role> --limit 8\`。需要图片槽时加 \`--needs-media\`、\`--planned-images <n>\`、\`--provided-images <n>\` 或 \`--image-gen\`,候选会基于真实 \`mediaSlots\`。
 
-单页契约使用 \`npm run inspect:layout -- <layout>\`。\`propShapes\` 会给出 \`copy\`、对象数组和嵌套数组的内部 key;写 \`copy\`、\`cells\`、\`items\`、\`rows\` 等对象字段时只使用 \`propShapes\` 列出的 key,不要凭字段名猜测。写数组、数量或图片时使用 \`npm run props:safe -- <layout> '<props-json>' [--images <path...>]\`。
+单页契约使用 \`npm run inspect:layout -- <layout>\`,可一次传多个 layout 或多次 \`--layout\`。\`copyBudgets\` 给出文案长度预算;\`propShapes\` 给出 \`copy\`、对象数组和嵌套数组的内部 key。写 \`copy\`、\`cells\`、\`items\`、\`rows\` 等对象字段时只使用 \`propShapes\` 列出的 key,不要凭字段名猜测。写数组、数量或图片时使用 \`npm run props:safe -- <layout> '<props-json>' [--images <path...>]\`。
 
-图片/视频只写入页面 \`props.images\` / \`props.media\`。不要写 \`slides[].media\`;用户提供图片时先用 \`props:safe --images\` 写入真实 slot。需要 image-gen 时先询问用户,用户只计划后续插图时选择并保留带 media slot 的页面。
+图片/视频只写入页面 \`props.images\` / \`props.media\`。不要写 \`slides[].media\`;用户提供本地素材时先运行 \`npm run media:stage -- <ppt-output-dir> <media-file...>\`,再把返回的 \`relative\` 路径交给 \`props:safe --images\` 或写入真实 media slot。每个素材最多使用一次。需要 image-gen 时先询问用户,用户只计划后续插图时选择并保留带 media slot 的页面。
 
 需要调整卡片/条目数量时,用 \`cardCount\`、\`itemCount\`、\`stepCount\` 等 count 参数控制显示数量。数组字段是模板内容池,不要为了隐藏元素而截短 \`cards\`、\`items\`、\`steps\`、\`stats\` 等数组;只覆盖当前显示的前 N 项,保留后续默认项供控制面板加回。
 
