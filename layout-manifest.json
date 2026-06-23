@@ -115229,26 +115229,26 @@
         },
         {
           "key": "showChannels",
-          "label": "次级文案",
+          "label": "联系方式",
           "type": "toggle",
           "default": true,
           "desc": "邮箱 / 电话 / 地点等联系信息组。",
           "publicKey": "showChannels",
-          "publicLabel": "次级文案",
+          "publicLabel": "联系方式",
           "description": "邮箱 / 电话 / 地点等联系信息组。"
         },
         {
           "key": "channelCount",
-          "label": "信息条目数量",
+          "label": "联系方式数量",
           "type": "range",
           "default": 3,
           "min": 1,
           "max": 3,
           "step": 1,
-          "desc": "展示的次级文案条目数量。",
+          "desc": "展示的联系方式条目数量。",
           "publicKey": "itemCount",
-          "publicLabel": "信息条目数量",
-          "description": "展示的次级文案条目数量。"
+          "publicLabel": "联系方式数量",
+          "description": "展示的联系方式条目数量。"
         },
         {
           "key": "showBigMark",
@@ -115298,7 +115298,7 @@
         {
           "key": "channelCount",
           "publicKey": "itemCount",
-          "label": "信息条目数量",
+          "label": "联系方式数量",
           "arrays": [
             "channels"
           ],
@@ -123815,9 +123815,242 @@
       "key": "theme11_page086",
       "themePack": "theme11",
       "pageNumber": 86,
-      "label": "谢幕",
+      "label": "破冰航道",
       "slot": "page86",
       "dataLayout": "THEME11-086",
+      "controls": [
+        {
+          "key": "backgroundMode",
+          "label": "背景替换",
+          "type": "select",
+          "default": "unicorn",
+          "options": [
+            {
+              "value": "unicorn",
+              "label": "动态"
+            },
+            {
+              "value": "media",
+              "label": "上传"
+            }
+          ],
+          "desc": "动态 shader 或自定义背景媒体",
+          "publicKey": "backgroundMode",
+          "publicLabel": "背景替换",
+          "description": "动态 shader 或自定义背景媒体"
+        },
+        {
+          "key": "unicornScene",
+          "label": "动态场景",
+          "type": "select",
+          "default": "tech",
+          "options": [
+            {
+              "value": "tech",
+              "label": "科技"
+            },
+            {
+              "value": "automations",
+              "label": "自动化"
+            },
+            {
+              "value": "moving",
+              "label": "流动"
+            },
+            {
+              "value": "goey",
+              "label": "黏球"
+            }
+          ],
+          "dependsOn": "backgroundMode",
+          "dependsOnValue": "unicorn",
+          "desc": "选择固定 Unicorn shader 场景",
+          "publicKey": "dynamicVisual",
+          "publicLabel": "动态场景",
+          "description": "选择固定 Unicorn shader 场景"
+        },
+        {
+          "key": "layout",
+          "label": "排版布局",
+          "type": "select",
+          "default": "bottomRight",
+          "options": [
+            {
+              "value": "bottomRight",
+              "label": "右下留白"
+            },
+            {
+              "value": "bottomLeft",
+              "label": "左下留白"
+            },
+            {
+              "value": "overlay",
+              "label": "满图叠加"
+            }
+          ],
+          "desc": "根据图片的空白位置安排文字。",
+          "publicKey": "layout",
+          "publicLabel": "排版布局",
+          "description": "根据图片的空白位置安排文字。"
+        },
+        {
+          "key": "textTone",
+          "label": "文字色调",
+          "type": "select",
+          "default": "dark",
+          "options": [
+            {
+              "value": "dark",
+              "label": "深色"
+            },
+            {
+              "value": "light",
+              "label": "浅色"
+            }
+          ],
+          "desc": "按图片明暗选择深/浅文字。",
+          "publicKey": "textTone",
+          "publicLabel": "文字色调",
+          "description": "按图片明暗选择深/浅文字。"
+        },
+        {
+          "key": "showScrim",
+          "label": "压暗层",
+          "type": "toggle",
+          "default": false,
+          "desc": "给文字区域增加渐变压暗。",
+          "publicKey": "showScrim",
+          "publicLabel": "压暗层",
+          "description": "给文字区域增加渐变压暗。"
+        },
+        {
+          "key": "headlineStroke",
+          "label": "标题描边",
+          "type": "toggle",
+          "default": true,
+          "desc": "给大标题增加描边。",
+          "publicKey": "headlineStroke",
+          "publicLabel": "标题描边",
+          "description": "给大标题增加描边。"
+        },
+        {
+          "key": "surface",
+          "label": "氛围基调",
+          "type": "select",
+          "default": "paper",
+          "options": [
+            {
+              "value": "paper",
+              "label": "柔和"
+            },
+            {
+              "value": "ink",
+              "label": "冷冽"
+            },
+            {
+              "value": "ember",
+              "label": "暖烈"
+            }
+          ],
+          "desc": "控制颗粒、暗角等氛围叠层。",
+          "publicKey": "surface",
+          "publicLabel": "氛围基调",
+          "description": "控制颗粒、暗角等氛围叠层。"
+        },
+        {
+          "key": "showStatus",
+          "label": "状态胶囊",
+          "type": "toggle",
+          "default": true,
+          "desc": "顶部状态胶囊。",
+          "publicKey": "showStatus",
+          "publicLabel": "状态胶囊",
+          "description": "顶部状态胶囊。"
+        },
+        {
+          "key": "showStats",
+          "label": "指标行",
+          "type": "toggle",
+          "default": true,
+          "desc": "顶部横排指标。",
+          "publicKey": "showStats",
+          "publicLabel": "指标行",
+          "description": "顶部横排指标。"
+        },
+        {
+          "key": "statCount",
+          "label": "指标数量",
+          "type": "range",
+          "default": 3,
+          "min": 2,
+          "max": 3,
+          "step": 1,
+          "desc": "指标行数量。",
+          "publicKey": "statCount",
+          "publicLabel": "指标数量",
+          "description": "指标行数量。"
+        },
+        {
+          "key": "showEdgeLabel",
+          "label": "侧边竖排标签",
+          "type": "toggle",
+          "default": true,
+          "desc": "侧边坐标标签。",
+          "publicKey": "showEdgeLabel",
+          "publicLabel": "侧边竖排标签",
+          "description": "侧边坐标标签。"
+        },
+        {
+          "key": "showCta",
+          "label": "排版式 CTA",
+          "type": "toggle",
+          "default": true,
+          "desc": "标题下方行动语。",
+          "publicKey": "showCta",
+          "publicLabel": "排版式 CTA",
+          "description": "标题下方行动语。"
+        },
+        {
+          "key": "showGhostMark",
+          "label": "背景大字符",
+          "type": "toggle",
+          "default": false,
+          "desc": "角落超大幽灵字符。",
+          "publicKey": "showGhostMark",
+          "publicLabel": "背景大字符",
+          "description": "角落超大幽灵字符。"
+        },
+        {
+          "key": "showScaffold",
+          "label": "边框骨架",
+          "type": "toggle",
+          "default": true,
+          "desc": "侧边竖排标签与四角括线。",
+          "publicKey": "showScaffold",
+          "publicLabel": "边框骨架",
+          "description": "侧边竖排标签与四角括线。"
+        }
+      ],
+      "countBindings": [
+        {
+          "key": "statCount",
+          "publicKey": "statCount",
+          "label": "指标数量",
+          "arrays": [
+            "stats"
+          ],
+          "min": 2,
+          "max": 3
+        }
+      ]
+    },
+    "theme11_page087": {
+      "key": "theme11_page087",
+      "themePack": "theme11",
+      "pageNumber": 87,
+      "label": "谢幕",
+      "slot": "page87",
+      "dataLayout": "THEME11-087",
       "controls": [
         {
           "key": "surface",
@@ -123928,13 +124161,13 @@
         },
         {
           "key": "showContact",
-          "label": "次级文案",
+          "label": "联系方式",
           "type": "toggle",
           "default": true,
-          "desc": "排版化的次级文案清单（非按钮控件）。",
+          "desc": "排版化的联系方式清单（非按钮控件）。",
           "publicKey": "showContact",
-          "publicLabel": "次级文案",
-          "description": "排版化的次级文案清单（非按钮控件）。"
+          "publicLabel": "联系方式",
+          "description": "排版化的联系方式清单（非按钮控件）。"
         },
         {
           "key": "contactCount",
@@ -123944,10 +124177,10 @@
           "min": 1,
           "max": 3,
           "step": 1,
-          "desc": "次级文案的条目数量。",
+          "desc": "联系方式的条目数量。",
           "publicKey": "itemCount",
           "publicLabel": "联系条数",
-          "description": "次级文案的条目数量。"
+          "description": "联系方式的条目数量。"
         },
         {
           "key": "showKicker",
