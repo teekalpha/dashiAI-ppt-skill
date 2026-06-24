@@ -5317,7 +5317,21 @@ refreshRailCatalog();
       const slide = root.closest?.('.slide');
       if(slide) slides = [slide];
     }
-    slides.forEach(slide => textCounters.set(getTextSlideKey(slide), 0));
+    slides.forEach(slide => {
+      const slideKey = getTextSlideKey(slide);
+      const prefix = `text:${slideKey}:`;
+      let max = 0;
+      [
+        ...(slide.dataset?.editableId ? [slide] : []),
+        ...(slide.querySelectorAll?.('[data-editable-id]') || []),
+      ].forEach(el => {
+        const id = el.dataset.editableId || '';
+        if(!id.startsWith(prefix)) return;
+        const index = Number(id.slice(prefix.length));
+        if(Number.isFinite(index) && index > max) max = index;
+      });
+      textCounters.set(slideKey, max);
+    });
   }
 
   function makeEditable(el){

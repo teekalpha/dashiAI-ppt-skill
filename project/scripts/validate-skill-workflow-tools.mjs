@@ -530,8 +530,11 @@ function testSyncedSkillOutput() {
     for (const file of visibleTextFiles) {
       assertAcceptedThemeText(readFileSync(path.join(skillRoot, file), 'utf8'), file);
     }
-    const styleGrid = PNG.sync.read(readFileSync(path.join(skillRoot, 'assets/skill/theme-style-grid.png')));
-    assert(styleGrid.height <= Math.ceil(styleGrid.width / ACCEPTED_THEME_KEYS.length), 'synced style grid should be cropped to accepted themes');
+    const sourceStyleGrid = readFileSync(path.join(ROOT, 'assets/skill/theme-style-grid.png'));
+    const syncedStyleGrid = readFileSync(path.join(skillRoot, 'assets/skill/theme-style-grid.png'));
+    const styleGrid = PNG.sync.read(syncedStyleGrid);
+    assert(styleGrid.height <= Math.ceil(styleGrid.width / ACCEPTED_THEME_KEYS.length), 'synced style grid should be a horizontal accepted-theme strip');
+    assert(syncedStyleGrid.equals(sourceStyleGrid), 'synced style grid should match the checked-in style grid image');
 
     const schema = JSON.parse(readFileSync(path.join(skillRoot, 'references/goal-spec.schema.json'), 'utf8'));
     assert(
