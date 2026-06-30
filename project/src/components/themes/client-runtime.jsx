@@ -1,45 +1,15 @@
 import React from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
-import { ImageSlotActions as theme01ImageSlotActions } from './theme01/source/slides/SlideKit.jsx';
-import { ImageSlotMediaContext as theme03ImageSlotMediaContext } from './theme03/source/src/ImageSlot.jsx';
-import { KxImageSlotMediaContext as theme06KxImageSlotMediaContext } from './theme06/source/slides/kit.jsx';
-import { AdaptiveImageSlotMediaContext as theme08AdaptiveImageSlotMediaContext } from './theme08/source/components/AclPrimitives.jsx';
-import { ImageStripMediaContext as theme09ImageStripMediaContext } from './theme09/source/slides/ImageStrip.jsx';
-import { DeckImageSlotMediaContext as theme10DeckImageSlotMediaContext } from './theme10/source/components/DeckImageSlot.jsx';
-import { IgnisImageSlotMediaContext as theme11ImageSlotMediaContext } from './theme11/source/ignBase.jsx';
-import { runtimePages as theme01Pages } from './theme01/runtime.jsx';
-import { runtimePages as theme02Pages } from './theme02/runtime.jsx';
-import { runtimePages as theme03Pages } from './theme03/runtime.jsx';
-import { runtimePages as theme04Pages } from './theme04/runtime.jsx';
-import { runtimePages as theme05Pages } from './theme05/runtime.jsx';
-import { runtimePages as theme06Pages } from './theme06/runtime.jsx';
-import { runtimePages as theme07Pages } from './theme07/runtime.jsx';
-import { runtimePages as theme08Pages } from './theme08/runtime.jsx';
-import { runtimePages as theme09Pages } from './theme09/runtime.jsx';
-import { runtimePages as theme10Pages } from './theme10/runtime.jsx';
-import { runtimePages as theme11Pages } from './theme11/runtime.jsx';
-import { runtimePages as theme12Pages } from './theme12/runtime.jsx';
+// JAD-201:主题注册表(runtimePages + 图片槽 Provider 包裹)从可注入模块取。
+// renderDeck 打包时把 `@dashi/theme-registry` 别名指向「全主题」或「按 deck 实际用到的主题裁剪版」。
+import { runtimePages, wrapThemeImageProviders } from '@dashi/theme-registry';
 
 const mountedRoots = new WeakMap();
 const rootMediaApis = new WeakMap();
 const IMAGE_UPLOAD_MAX_DIM = 1400;
 const IMAGE_UPLOAD_QUALITY = 0.78;
 const releaseInactiveThemeKeys = new Set(['theme03', 'theme10']);
-const runtimePages = [
-  ...theme01Pages,
-  ...theme02Pages,
-  ...theme03Pages,
-  ...theme04Pages,
-  ...theme05Pages,
-  ...theme06Pages,
-  ...theme07Pages,
-  ...theme08Pages,
-  ...theme09Pages,
-  ...theme10Pages,
-  ...theme11Pages,
-  ...theme12Pages,
-];
 const entriesByKey = new Map(runtimePages.map(page => [page.key, page]));
 
 function readJson(value, fallback) {
@@ -225,13 +195,47 @@ function mediaKind(value) {
   return mediaItem(value)?.kind || 'image';
 }
 
+function videoPosterSrc(src) {
+  if (typeof src !== 'string') return null;
+  const match = src.match(/^(.*)\.(mp4|webm|mov|m4v)(?:[?#].*)?$/i);
+  return match ? `${match[1]}.poster.jpg` : null;
+}
+
+function isRuntimeSlideActive(slide) {
+  return !!slide?.hasAttribute?.('data-deck-active') || !!slide?.classList?.contains?.('active');
+}
+
+function releaseVideoElement(video) {
+  video.pause?.();
+  if (video.getAttribute('src')) video.removeAttribute('src');
+  video.querySelectorAll?.('source[src]')?.forEach(source => source.removeAttribute('src'));
+  video.load?.();
+}
+
 function renderMedia(value, props = {}) {
   const item = mediaItem(value);
   if (!item?.src) return null;
+  const { active = true, ...mediaProps } = props;
   if (item.kind === 'video') {
-    return <video src={item.src} muted playsInline loop autoPlay preload="metadata" {...props} />;
+    const poster = videoPosterSrc(item.src);
+    if (!active) {
+      return poster
+        ? <img src={poster} alt="" loading="lazy" decoding="async" data-dashi-video-poster="true" {...mediaProps} />
+        : <div aria-hidden="true" data-dashi-video-poster="true" {...mediaProps} />;
+    }
+    return (
+      <video
+        src={item.src}
+        muted
+        loop
+        playsInline
+        preload="none"
+        poster={poster}
+        {...mediaProps}
+      />
+    );
   }
-  return <img src={item.src} alt="" {...props} />;
+  return <img src={item.src} alt="" loading="lazy" decoding="async" {...mediaProps} />;
 }
 
 function createMediaApi(slide, baseProps) {
@@ -272,6 +276,7 @@ function createMediaApi(slide, baseProps) {
   }
 
   return {
+    isActive: () => isRuntimeSlideActive(slide),
     get: (key, index) => {
       const slideId = slide.dataset.vmSlideId;
       const currentProps = window.__deckViewModel?.getState?.().props?.[slideId] || {};
@@ -360,6 +365,7 @@ function HostImageSlot({ mediaApi, index, options = {} }) {
       {filled ? (
         <>
           {renderMedia(value, {
+            active: mediaApi.isActive?.() !== false,
             style: {
               width: '100%',
               height: '100%',
@@ -443,19 +449,7 @@ function withImageProviders(element, mediaApi) {
   };
   const keyedValue = createKeyedImageBridge(mediaApi);
   const theme11Value = createTheme11ImageBridge(mediaApi);
-  return React.createElement(theme01ImageSlotActions.Provider, { value: theme01Value },
-    React.createElement(theme03ImageSlotMediaContext.Provider, { value: theme03Value },
-      React.createElement(theme06KxImageSlotMediaContext.Provider, { value: keyedValue },
-        React.createElement(theme08AdaptiveImageSlotMediaContext.Provider, { value: keyedValue },
-          React.createElement(theme09ImageStripMediaContext.Provider, { value: keyedValue },
-            React.createElement(theme10DeckImageSlotMediaContext.Provider, { value: keyedValue },
-              React.createElement(theme11ImageSlotMediaContext.Provider, { value: theme11Value }, element),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
+  return wrapThemeImageProviders(element, { theme01Value, theme03Value, keyedValue, theme11Value });
 }
 
 function createTheme11ImageBridge(mediaApi) {
@@ -499,6 +493,7 @@ function createKeyedImageBridge(mediaApi) {
     return indexes.get(key);
   };
   return {
+    isActive: () => mediaApi.isActive?.() !== false,
     get: (slotKey, fallbackIndex) => mediaApi.get('images', resolveIndex(slotKey, fallbackIndex)),
     set: (slotKey, fallbackIndex, value) => mediaApi.set('images', resolveIndex(slotKey, fallbackIndex), value),
     pick: (slotKey, fallbackIndex) => mediaApi.pick('images', resolveIndex(slotKey, fallbackIndex)),
@@ -618,6 +613,7 @@ function releaseImportedThemeSlide(slide) {
   const root = slide?.querySelector?.('.imported-theme-root');
   const api = root && mountedRoots.get(root);
   if (!root || !api) return false;
+  root.querySelectorAll('video').forEach(releaseVideoElement);
   try {
     api.unmount();
   } catch {}

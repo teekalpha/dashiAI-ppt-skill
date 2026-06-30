@@ -49,6 +49,8 @@
 /* END USAGE */
 
 (() => {
+  if (typeof HTMLElement === 'undefined' || typeof customElements === 'undefined') return;
+
   const STATE_FILE = '.image-slots.state.json';
   // 2× a ~600px slot in a 1920-wide deck — retina-sharp without making the
   // sidecar enormous. A 1200px WebP at q=0.85 is ~150-300KB.
@@ -116,6 +118,24 @@
 
   const S_MAX = 5;
   const clampS = (s) => Math.max(1, Math.min(S_MAX, s));
+
+  // Convention poster path: swap a file-path video extension for `.poster.jpg`.
+  // Returns null for data: URLs (no sidecar poster) so no broken poster loads.
+  function videoPoster(src) {
+    const s = String(src || '');
+    return /\.(mp4|m4v|mov|webm|ogv)(?:[?#].*)?$/i.test(s)
+      ? s.replace(/\.(mp4|m4v|mov|webm|ogv)(?:[?#].*)?$/i, '.poster.jpg')
+      : null;
+  }
+
+  function releaseVideoElement(video) {
+    if (!video) return;
+    video.pause?.();
+    if (video.getAttribute('src')) {
+      video.removeAttribute('src');
+      video.load?.();
+    }
+  }
 
   // Normalize a stored slot value. Pre-reframe sidecars stored a bare
   // data-URL string; newer ones store {u, s, x, y}. Either shape is valid.
@@ -246,15 +266,14 @@
       root.innerHTML =
         '<style>' + stylesheet + '</style>' +
         '<div class="frame" part="frame">' +
-        '  <img part="image" alt="" draggable="false" style="display:none">' +
-        '  <video part="video" muted playsinline loop autoplay preload="metadata" style="display:none"></video>' +
+        '  <img part="image" alt="" draggable="false" loading="lazy" decoding="async" style="display:none">' +
         '  <div class="empty" part="empty">' + icon +
         '    <div class="cap"></div>' +
         '    <div class="sub">or <u>browse files</u></div></div>' +
         '  <div class="ring" part="ring"></div>' +
         '</div>' +
         '<div class="spill">' +
-        '  <img class="ghost" alt="" draggable="false">' +
+        '  <img class="ghost" alt="" draggable="false" loading="lazy" decoding="async">' +
         '  <div class="handle" data-c="nw"></div><div class="handle" data-c="ne"></div>' +
         '  <div class="handle" data-c="sw"></div><div class="handle" data-c="se"></div>' +
         '</div>' +
@@ -264,7 +283,7 @@
       this._frame = root.querySelector('.frame');
       this._ring = root.querySelector('.ring');
       this._img = root.querySelector('.frame img');
-      this._video = root.querySelector('.frame video');
+      this._video = null;
       this._empty = root.querySelector('.empty');
       this._cap = root.querySelector('.cap');
       this._sub = root.querySelector('.sub');
@@ -305,7 +324,6 @@
       // naturalWidth/Height aren't known until load — re-apply so the cover
       // baseline is computed from real dimensions, not the 100%×100% fallback.
       this._img.addEventListener('load', () => this._applyView());
-      this._video.addEventListener('loadedmetadata', () => this._applyView());
       // Gated on editable + fit=cover so share links and contain/fill slots
       // stay static.
       this.addEventListener('dblclick', (e) => {
@@ -418,6 +436,14 @@
       // frame's clamp range.
       this._ro = new ResizeObserver(() => this._render());
       this._ro.observe(this);
+      this._activeObserver = new MutationObserver(() => this._render());
+      this._observeActiveSlide();
+      this._refreshActiveState = () => {
+        this._observeActiveSlide();
+        this._render();
+      };
+      queueMicrotask(this._refreshActiveState);
+      this._activeFrame = requestAnimationFrame(this._refreshActiveState);
       load();
       this._render();
     }
@@ -429,6 +455,10 @@
       this.removeEventListener('dragleave', this);
       this.removeEventListener('drop', this);
       if (this._ro) { this._ro.disconnect(); this._ro = null; }
+      if (this._activeObserver) { this._activeObserver.disconnect(); this._activeObserver = null; }
+      if (this._activeFrame) { cancelAnimationFrame(this._activeFrame); this._activeFrame = null; }
+      this._refreshActiveState = null;
+      this._removeVideo();
       this._exitReframe(false);
     }
 
@@ -461,6 +491,42 @@
     }
 
     attributeChangedCallback() { if (this.shadowRoot) this._render(); }
+
+    _ensureVideo() {
+      if (this._video) return this._video;
+      const video = document.createElement('video');
+      video.setAttribute('part', 'video');
+      video.muted = true;
+      video.playsInline = true;
+      video.loop = true;
+      video.preload = 'none';
+      video.style.display = 'none';
+      video.addEventListener('loadedmetadata', () => this._applyView());
+      this._frame.insertBefore(video, this._empty);
+      this._video = video;
+      return video;
+    }
+
+    _removeVideo() {
+      if (!this._video) return;
+      releaseVideoElement(this._video);
+      this._video.remove();
+      this._video = null;
+    }
+
+    _observeActiveSlide() {
+      if (!this._activeObserver) return;
+      this._activeObserver.disconnect();
+      const slide = this.closest('.slide');
+      if (slide) this._activeObserver.observe(slide, { attributes: true, attributeFilter: ['class', 'data-deck-active', 'hidden'] });
+    }
+
+    _isActive() {
+      if (this.closest('#slide-rail')) return false;
+      const slide = this.closest('.slide');
+      if (!slide) return true;
+      return slide.hasAttribute('data-deck-active') || slide.classList.contains('active');
+    }
 
     // handleEvent — one listener object for all four drag events keeps the
     // add/remove symmetric and the depth counter correct.
@@ -644,35 +710,55 @@
       if (url) {
         if (kind === 'video') {
           this._exitReframe(false);
-          if (this._video.getAttribute('src') !== url) this._video.src = url;
-          this._img.style.display = 'none';
-          this._img.removeAttribute('src');
+          const poster = videoPoster(url);
           this._ghost.removeAttribute('src');
-          this._video.style.display = 'block';
-          this._video.style.width = '100%';
-          this._video.style.height = '100%';
-          this._video.style.left = '50%';
-          this._video.style.top = '50%';
-          this._video.style.objectFit = this.getAttribute('fit') || 'cover';
-          this._video.style.objectPosition = this.getAttribute('position') || '50% 50%';
+          if (this._isActive()) {
+            const video = this._ensureVideo();
+            this._img.style.display = 'none';
+            this._img.removeAttribute('src');
+            if (video.getAttribute('src') !== url) {
+              releaseVideoElement(video);
+              video.src = url;
+            }
+            if (poster) video.setAttribute('poster', poster);
+            else video.removeAttribute('poster');
+            video.style.display = 'block';
+            video.style.width = '100%';
+            video.style.height = '100%';
+            video.style.left = '50%';
+            video.style.top = '50%';
+            video.style.objectFit = this.getAttribute('fit') || 'cover';
+            video.style.objectPosition = this.getAttribute('position') || '50% 50%';
+            this._empty.style.display = 'none';
+          } else {
+            this._removeVideo();
+            if (poster) {
+              if (this._img.getAttribute('src') !== poster) this._img.src = poster;
+              this._img.style.display = 'block';
+              this._applyView();
+              this._empty.style.display = 'none';
+            } else {
+              this._img.style.display = 'none';
+              this._img.removeAttribute('src');
+              this._empty.style.display = 'flex';
+            }
+          }
         } else {
           if (this._img.getAttribute('src') !== url) {
             this._img.src = url;
             this._ghost.src = url;
           }
-          this._video.style.display = 'none';
-          this._video.removeAttribute('src');
+          this._removeVideo();
           this._img.style.display = 'block';
           this._clampView();
           this._applyView();
+          this._empty.style.display = 'none';
         }
-        this._empty.style.display = 'none';
         this.setAttribute('data-filled', '');
       } else {
         this._img.style.display = 'none';
         this._img.removeAttribute('src');
-        this._video.style.display = 'none';
-        this._video.removeAttribute('src');
+        this._removeVideo();
         this._ghost.removeAttribute('src');
         this._empty.style.display = 'flex';
         this.removeAttribute('data-filled');

@@ -21,8 +21,20 @@ import {
   RUNTIME_ASSET_PATHS,
   RUNTIME_TEMPLATE,
 } from './runtime-assets.mjs';
+import {
+  buildThemeRegistrySource,
+  isFullThemeSet,
+  normalizeThemeKeys,
+} from './components/themes/theme-registry-codegen.mjs';
+import {
+  buildClientRuntime,
+  buildClientRuntimeFromModules,
+  prebuiltBundlePath,
+  prebuiltModulePath,
+} from './components/themes/runtime-build.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
+const FULL_THEME_REGISTRY = path.join(ROOT, 'src/components/themes/theme-registry.jsx');
 const MIGRATION_ONLY_DIRS = new Set(['uploads', 'screens', 'screenshots', 'shots', 'scratch']);
 const PREVIEW_FAVICON = 'assets/skill/dashiai-ppt-favicon.png';
 
@@ -46,7 +58,16 @@ export function renderDeck(deck, { outFile, includeThemeSwitcher = deck.preview?
 
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
   fs.writeFileSync(outFile, html);
-  copyRuntimeAssets(path.dirname(outFile));
+  copyRuntimeAssets(path.dirname(outFile), { usedThemeKeys: collectUsedThemeKeys(viewModel) });
+}
+
+// JAD-201:从 deck 实际用到的主题(每页 themePack)推导待打包的主题集合。
+function collectUsedThemeKeys(viewModel) {
+  const keys = new Set();
+  for (const slide of viewModel.slides || []) {
+    if (slide.themePack) keys.add(slide.themePack);
+  }
+  return normalizeThemeKeys(keys);
 }
 
 function insertSlides(template, slides) {
@@ -102,7 +123,7 @@ function injectDeckViewModel(html, viewModel) {
   );
 }
 
-function copyRuntimeAssets(outDir) {
+function copyRuntimeAssets(outDir, { usedThemeKeys = [] } = {}) {
   const assetsDir = path.join(outDir, 'assets');
   const imagesDir = path.join(outDir, 'images');
   const preservedUserMedia = preserveUserMediaDirs(outDir);
@@ -118,8 +139,9 @@ function copyRuntimeAssets(outDir) {
       if (assetPath === RUNTIME_TEMPLATE) continue;
       copyRuntimeAsset(assetPath, outDir);
     }
-    copyImportedThemeAssets(outDir);
-    buildImportedThemeRuntime(path.join(assetsDir, 'imported-theme-runtime.js'));
+    copyImportedThemeAssets(outDir, usedThemeKeys);
+    buildImportedThemeRuntime(path.join(assetsDir, 'imported-theme-runtime.js'), usedThemeKeys);
+    buildDeckRuntime(path.join(assetsDir, 'deck-runtime.js'));
     restoreUserMediaDirs(preservedUserMedia, outDir);
     const imageSlotStateFile = path.join(outDir, '.image-slots.state.json');
     if (!fs.existsSync(imageSlotStateFile)) fs.writeFileSync(imageSlotStateFile, '{}\n');
@@ -166,19 +188,17 @@ function cleanupPreservedUserMedia(preserved) {
   fs.rmSync(preserved.tempRoot, { recursive: true, force: true });
 }
 
-function buildImportedThemeRuntime(outFile) {
+// JAD-168 step 1:交付件运行时的第二个 bundle(纯 DOM JS,无 React)。当前入口为空,
+// 后续把 template-swiss.html 的内联 IIFE 逐个迁入 src/runtime/* 并由此打包注入。
+function buildDeckRuntime(outFile) {
   buildSync({
-    entryPoints: [path.join(ROOT, 'src/components/themes/client-runtime.jsx')],
+    entryPoints: [path.join(ROOT, 'src/runtime/index.js')],
     outfile: outFile,
     bundle: true,
+    minify: true,
     format: 'iife',
-    globalName: 'DeckJsxRuntime',
+    globalName: 'DeckRuntime',
     platform: 'browser',
-    jsx: 'automatic',
-    loader: {
-      '.css': 'text',
-    },
-    inject: [path.join(ROOT, 'src/react-shim.js')],
     define: {
       'process.env.NODE_ENV': '"production"',
     },
@@ -186,9 +206,95 @@ function buildImportedThemeRuntime(outFile) {
   });
 }
 
-function copyImportedThemeAssets(outDir) {
+// JAD-201/203:打包这份 deck 实际用到主题的浏览器运行时。两条等价路径(见 runtime-build.mjs):
+//   - dev / 有主题源(showcase 全主题、本地迭代):源 esbuild(行为同 JAD-201)。
+//   - 安装版 / 无可读主题源:单主题拷贝预构建自包含 bundle;多主题用预构建模块链接。
+// `DASHI_PPT_THEME_RUNTIME`:auto(默认,有源走源、无源走预构建)| prebuilt(强制预构建,测试用)
+//   | source(强制源)。安装版无主题源时自动走预构建,产出与源路径等价(单一 React,水合一致)。
+function buildImportedThemeRuntime(outFile, usedThemeKeys = []) {
+  const normalized = normalizeThemeKeys(usedThemeKeys || []);
+  const mode = process.env.DASHI_PPT_THEME_RUNTIME || 'auto';
+  const sourcePresent = hasThemeSource(normalized);
+  const wantPrebuilt = mode === 'prebuilt' || (mode === 'auto' && !sourcePresent);
+
+  if (wantPrebuilt) {
+    // 单主题(绝大多数 deck):直接拷贝预构建自包含 bundle —— 零 deck 级 esbuild、零主题源。
+    if (normalized.length === 1) {
+      const bundle = prebuiltBundlePath(ROOT, normalized[0]);
+      if (fs.existsSync(bundle)) {
+        fs.copyFileSync(bundle, outFile);
+        return;
+      }
+    }
+    // 多主题(或单主题缺自包含 bundle):用预构建 minified 模块链接(无主题源)。
+    if (normalized.length && prebuiltModulesAvailable(normalized)) {
+      buildClientRuntimeFromModules({ root: ROOT, outFile, themeKeys: normalized });
+      return;
+    }
+    if (mode === 'prebuilt') {
+      throw new Error(`prebuilt theme runtime requested but artifacts missing for [${normalized.join(', ')}]; run \`node scripts/build/build-theme-runtime.mjs\`.`);
+    }
+    // mode=auto 且无源、无预构建:落到下方报错。
+  }
+
+  if (sourcePresent && mode !== 'prebuilt') {
+    buildImportedThemeRuntimeFromSource(outFile, normalized);
+    return;
+  }
+
+  throw new Error(`No imported theme runtime available for [${normalized.join(', ')}] (no readable theme source and no prebuilt artifacts).`);
+}
+
+// 源路径(JAD-201):别名指向全主题签入注册表或按 usedThemeKeys 裁剪的源注册表。
+function buildImportedThemeRuntimeFromSource(outFile, usedThemeKeys = []) {
+  const { registryPath, cleanup } = resolveThemeRegistryEntry(usedThemeKeys);
+  try {
+    buildClientRuntime({ root: ROOT, outFile, registryPath });
+  } finally {
+    cleanup();
+  }
+}
+
+// 主题源是否在盘上(dev 仓为真;安装版已删 runtime.jsx + theme-registry.jsx,为假)。
+function hasThemeSource(normalized) {
+  if (!normalized.length) return fs.existsSync(FULL_THEME_REGISTRY);
+  return normalized.every(key => fs.existsSync(path.join(ROOT, 'src/components/themes', key, 'runtime.jsx')));
+}
+
+function prebuiltModulesAvailable(normalized) {
+  return normalized.length > 0 && normalized.every(key => fs.existsSync(prebuiltModulePath(ROOT, key)));
+}
+
+// 全主题(或主题集合无法识别时)→ 直接用签入的全主题注册表;
+// 单/少主题 → 生成裁剪版临时注册表(写到 gitignore 的 node_modules/.cache,
+// import 用指向仓库的绝对路径,确保从临时位置也能解析主题源码与 react)。
+function resolveThemeRegistryEntry(usedThemeKeys) {
+  const normalized = normalizeThemeKeys(usedThemeKeys || []);
+  if (!normalized.length || isFullThemeSet(normalized)) {
+    return { registryPath: FULL_THEME_REGISTRY, cleanup: () => {} };
+  }
+  const importPrefix = `${path.join(ROOT, 'src/components/themes')}/`;
+  const source = buildThemeRegistrySource(normalized, { importPrefix });
+  const cacheDir = path.join(ROOT, 'node_modules/.cache/dashi-theme-registry');
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const registryPath = path.join(
+    cacheDir,
+    `registry-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.jsx`,
+  );
+  fs.writeFileSync(registryPath, source);
+  return {
+    registryPath,
+    cleanup: () => { try { fs.rmSync(registryPath, { force: true }); } catch {} },
+  };
+}
+
+function copyImportedThemeAssets(outDir, usedThemeKeys = []) {
   const themesDir = path.join(ROOT, 'src/components/themes');
   if (!fs.existsSync(themesDir)) return;
+  // JAD-201: a deck only needs its used theme(s)' assets. Empty/all-themes (e.g.
+  // the showcase) copies everything; a single-/few-theme deck skips the rest,
+  // shrinking the deck and not leaking other themes' image/video source assets.
+  const usedFilter = new Set(usedThemeKeys || []);
   const copiedByRelativePath = new Map(
     REQUIRED_OUTPUT_ASSETS.map(assetPath => [
       assetPath,
@@ -196,6 +302,7 @@ function copyImportedThemeAssets(outDir) {
     ]),
   );
   for (const themeKey of fs.readdirSync(themesDir).sort()) {
+    if (usedFilter.size > 0 && !usedFilter.has(themeKey)) continue;
     const sourceDir = path.join(themesDir, themeKey, 'source');
     if (!fs.existsSync(sourceDir)) continue;
     const files = [];

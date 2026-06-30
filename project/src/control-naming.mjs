@@ -542,6 +542,7 @@ export function toPublicProps(props = {}, controls = []) {
 
 function exactPublicKey(key) {
   const exact = {
+    dealCount: 'exampleCount',
     showDeals: 'showExamples',
     riskCount: 'statusItemCount',
     showRisk: 'showStatus',

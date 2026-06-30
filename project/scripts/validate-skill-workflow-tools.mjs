@@ -39,7 +39,7 @@ const tests = [
   ['validate-goal-spec rejects unsafe goal shapes', testValidateGoalSpec],
   ['generated theme metadata has no serialized React defaults', testGeneratedMetadataNoSerializedReactDefaults],
   ['validate-goal-copy rejects neutral placeholder copy', testValidateGoalCopyPlaceholders],
-  ['validate-goal-copy ignores hidden nested array tails', testValidateGoalCopyNestedHiddenTails],
+  ['validate-goal-copy accepts nested count-bound plan arrays', testValidateGoalCopyNestedPlanArrays],
   ['checked-in goal examples pass goal spec', testCheckedInGoalExamples],
   ['preview panel handles type: images as an image list control', testImagesControl],
   ['control naming stays generic across user and agent contracts', testControlNaming],
@@ -91,7 +91,7 @@ function testLayoutQuery() {
 }
 
 function testControlNaming() {
-  const result = spawnSync('node', ['scripts/validate-control-naming.mjs'], {
+  const result = spawnSync('node', ['scripts/validate/validate-control-naming.mjs'], {
     cwd: ROOT,
     encoding: 'utf8',
   });
@@ -176,7 +176,10 @@ function testWriteSafeProps() {
   const backgroundMedia = runJson('scripts/write-safe-props.mjs', ['theme12_page020', JSON.stringify({
     media: ['assets/user-media/hero.webp'],
   })]);
-  assert(backgroundMedia.props?.backgroundMode === 'media', 'authored media should switch supported backgroundMode to media');
+  // JAD-198: unicorn-default pages keep the dynamic backdrop and do NOT auto-flip to 'media'
+  // just because an image slot was authored (auto-flip used to leave an empty upload placeholder).
+  // All backgroundMode-bearing pages default to 'unicorn', so authoring media must not switch it.
+  assert(backgroundMedia.props?.backgroundMode !== 'media', 'unicorn-default page keeps dynamic background and does not auto-flip to media on authored media');
 
   const videoMedia = runJson('scripts/write-safe-props.mjs', [
     'theme11_page063',
@@ -425,6 +428,7 @@ function testSkillPromptGuidance() {
   if (!(/缺失时只补最终 `ppt\/assets`/.test(skill) && /重跑校验/.test(skill))) missing.push('post-render media repair scope guidance');
   if (!(/props:safe -- --goal/.test(skill) || /props:safe --goal/.test(skill))) missing.push('whole-goal props:safe guidance');
   if (!(/goal:scaffold/.test(skill) && /唯一 layout 骨架/.test(skill))) missing.push('goal scaffold guidance');
+  if (!(/goal\.fill-plan\.json/.test(skill) && /fillPlan/.test(skill) && /visibleCount/.test(skill))) missing.push('goal scaffold fillPlan guidance');
   if (!(/可见数组项/.test(skill) && /隐藏的尾项/.test(skill) && /请输入文本/.test(skill))) missing.push('visible-vs-hidden placeholder guidance');
   if (!(/图片\/视频素材每个最多使用一次/.test(skill) && /不要重复填充同一素材/.test(skill))) missing.push('provided media one-time-use guidance');
   if (!(/素材用完/.test(skill) && /媒体插槽留空/.test(skill) && /无媒体插槽页面/.test(skill))) missing.push('media exhausted empty-or-no-media guidance');
@@ -457,7 +461,7 @@ function testSkillPromptGuidance() {
     if (skill.includes(oldName)) missing.push(`old theme name ${oldName}`);
   }
   if (!sync.includes('theme-style-grid.png')) missing.push('sync style grid asset handling');
-  if (!(/copyBudgets/.test(sync) && /media:stage/.test(sync) && /props:safe -- --goal/.test(sync))) missing.push('sync reference copy/media/whole-goal props tool guidance');
+  if (!(/fillPlan/.test(sync) && /goal\.fill-plan\.json/.test(sync) && /media:stage/.test(sync) && /props:safe -- --goal/.test(sync))) missing.push('sync reference fill/media/whole-goal props tool guidance');
   if (!(/goal:scaffold/.test(sync) && /唯一 layout 骨架/.test(sync))) missing.push('sync reference goal scaffold guidance');
   if (!(/当前会话工作目录/.test(sync) && /<skill-root>\/project\/output/.test(sync))) missing.push('sync reference current-thread output guidance');
   if (!(/ambient/.test(sync) && /动态背景/.test(sync))) missing.push('sync reference ambient background guidance');
@@ -665,13 +669,13 @@ async function testHttpPreviewDelivery() {
             titleTop: 'HTTP Preview',
             titleBottom: 'Smoke',
             en: 'Delivery Check',
-            lead: 'Verify the rendered deck is served through the local HTTP and HTTPS preview URLs.',
+            lead: 'Served through local HTTP preview.',
             chips: ['HTTP', 'HTTPS', 'Delivery'],
             panelIndex: '01',
             panelEn: 'LOCAL PREVIEW',
             meta: [
               { label: 'MODE', value: 'Workflow' },
-              { label: 'CHECK', value: 'Validation' },
+              { label: 'CHECK', value: 'Validate' },
               { label: 'ID', value: 'JAD-150' },
             ],
             footnote: 'DashiAI PPT · Preview delivery smoke',
@@ -683,12 +687,12 @@ async function testHttpPreviewDelivery() {
             kicker: 'Preview Result',
             value: '200',
             unit: 'OK',
-            sub: 'Local HTTP and HTTPS previews respond with the generated deck.',
+            sub: 'Local HTTP preview is live.',
             highlightWord: 'HTTP',
             secondaries: [
-              { value: '2', unit: 'URL', label: 'jadon.local previews' },
+              { value: '2', unit: 'URL', label: 'jadon preview' },
               { value: '1', unit: 'PID', label: 'server process' },
-              { value: '0', unit: 'file://', label: 'not final delivery' },
+              { value: '0', unit: 'file://', label: 'not file URL' },
             ],
             caption: 'HTTP Preview Smoke · Delivery Check',
           },
@@ -1016,7 +1020,6 @@ function testValidateGoalCopyPlaceholders() {
     execFileSync(npmCommand(), ['run', 'validate:goal-copy', '--', hiddenGoalPath, hiddenOutPath], npmCommandOptions({ cwd: ROOT, stdio: 'pipe' }));
 
     const visibleGoalPath = path.join(tmp, 'visible-placeholder.json');
-    const visibleOutPath = path.join(tmp, 'visible-placeholder/ppt/index.html');
     writeFileSync(visibleGoalPath, JSON.stringify({
       title: '可见占位校验',
       goal: '验证交付校验会拦截可见占位文案',
@@ -1031,45 +1034,44 @@ function testValidateGoalCopyPlaceholders() {
         },
       }],
     }, null, 2));
-    execFileSync(npmCommand(), ['run', 'render:goal', '--', visibleGoalPath, visibleOutPath], npmCommandOptions({ cwd: ROOT, stdio: 'pipe' }));
-    const result = spawnSync(npmCommand(), ['run', 'validate:goal-copy', '--', visibleGoalPath, visibleOutPath], npmCommandOptions({
+    const result = spawnSync(npmCommand(), ['run', 'render:goal', '--', visibleGoalPath, path.join(tmp, 'visible-placeholder/ppt/index.html')], npmCommandOptions({
       cwd: ROOT,
       encoding: 'utf8',
     }));
-    assert(result.status !== 0, 'validate:goal-copy should fail when rendered deck still contains neutral placeholder copy');
-    assert(`${result.stdout}\n${result.stderr}`.includes('请输入文本'), 'placeholder failure should mention 请输入文本');
+    assert(result.status !== 0, 'render:goal should reject visible neutral placeholder copy before render');
+    assert(`${result.stdout}\n${result.stderr}`.includes('中性占位文案'), 'placeholder failure should mention neutral placeholder copy');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 }
 
-function testValidateGoalCopyNestedHiddenTails() {
+function testValidateGoalCopyNestedPlanArrays() {
   const tmp = mkdtempSync(path.join(tmpdir(), 'dashi-goal-copy-nested-placeholder-'));
   try {
     const contract = runJson('scripts/inspect-layout.mjs', ['theme11_page027']);
     assert(
-      contract.countBindings?.some(binding => binding.key === 'featureCount' && binding.arrays?.includes('plans[].feats')),
-      'theme11_page027 should bind featureCount to nested plans[].feats',
+      contract.countBindings?.some(binding => binding.key === 'itemCount' && binding.arrays?.includes('plans[].feats')),
+      'theme11_page027 should bind itemCount to nested plans[].feats',
     );
 
     const normalized = runJson('scripts/write-safe-props.mjs', ['theme11_page027', JSON.stringify({
       headingHtml: '商业化套餐',
-      noteHtml: '每张套餐只显示四条权益',
+      noteHtml: '每张套餐显示五条权益',
       planCount: 3,
-      featureCount: 4,
+      itemCount: 5,
       plans: [
-        { name: 'Starter', en: 'Starter', cur: '¥', amt: '9k', per: '/ 月', feats: ['路线推荐', '社群挑战', '基础看板', '活动报名'] },
-        { name: 'Growth', en: 'Growth', cur: '¥', amt: '29k', per: '/ 月', feats: ['城市领队', '品牌任务', '赞助权益', '增长复盘'] },
-        { name: 'Scale', en: 'Scale', cur: '', amt: '定制', per: '按城市计费', feats: ['多城运营', '企业合作', '数据接口', '专属支持'] },
+        { name: 'Starter', en: 'Starter', cur: '¥', amt: '9k', per: '/ 月', feats: ['路线推荐', '社群挑战', '基础看板', '活动报名', '路线报告'] },
+        { name: 'Growth', en: 'Growth', cur: '¥', amt: '29k', per: '/ 月', feats: ['城市领队', '品牌任务', '赞助权益', '增长复盘', '联合活动'] },
+        { name: 'Scale', en: 'Scale', cur: '', amt: '定制', per: '按城市计费', feats: ['多城运营', '企业合作', '数据接口', '专属支持', '增长顾问'] },
       ],
     })]);
-    assert(JSON.stringify(normalized.props).includes('请输入文本'), 'test setup should keep neutral nested tail placeholders');
+    assert(normalized.props.plans.every(plan => plan.feats.length === normalized.props.itemCount), 'nested plan feature arrays should match itemCount');
 
-    const goalPath = path.join(tmp, 'nested-hidden-tail.json');
-    const outPath = path.join(tmp, 'nested-hidden-tail/ppt/index.html');
+    const goalPath = path.join(tmp, 'nested-plan-arrays.json');
+    const outPath = path.join(tmp, 'nested-plan-arrays/ppt/index.html');
     writeFileSync(goalPath, JSON.stringify({
-      title: '嵌套隐藏尾项校验',
-      goal: '验证被 featureCount 隐藏的套餐权益占位不会被误判',
+      title: '嵌套权益数组校验',
+      goal: '验证套餐权益数组按 itemCount 通过文案校验',
       themePack: 'theme11',
       slides: [{ layout: 'theme11_page027', props: normalized.props }],
     }, null, 2));
@@ -1107,11 +1109,15 @@ function testTheme12SharedChromeNeutral() {
 function testTheme11ImageSlotStateBridge() {
   const source = readFileSync(path.join(ROOT, 'src/components/themes/theme11/source/ignBase.jsx'), 'utf8');
   const runtime = readFileSync(path.join(ROOT, 'src/components/themes/client-runtime.jsx'), 'utf8');
+  // JAD-201:主题 context 的 import/Provider 移到 theme-registry.jsx(运行时按主题裁剪);
+  // client-runtime 仍负责构造 theme11 媒体桥并经 wrapThemeImageProviders 注入。
+  const registry = readFileSync(path.join(ROOT, 'src/components/themes/theme-registry.jsx'), 'utf8');
   assert(/IgnisImageSlotMediaContext/.test(source), 'theme11 ImageSlot must expose a media context');
   assert(/useContext\(IgnisImageSlotMediaContext\)/.test(source), 'theme11 ImageSlot must read the media context');
   assert(/mediaBridge[\s\S]{0,120}\.set\?\./.test(source), 'theme11 ImageSlot uploads must write to deck media state');
-  assert(/IgnisImageSlotMediaContext/.test(runtime), 'client runtime must import the theme11 media context');
-  assert(/theme11ImageSlotMediaContext\.Provider/.test(runtime), 'client runtime must provide the theme11 media context');
+  assert(/IgnisImageSlotMediaContext/.test(registry), 'theme registry must import the theme11 media context');
+  assert(/theme11ImageSlotMediaContext\.Provider/.test(registry), 'theme registry must provide the theme11 media context');
+  assert(/createTheme11ImageBridge/.test(runtime) && /theme11Value/.test(runtime), 'client runtime must bridge theme11 uploads into deck media state');
 }
 
 function assertNoSerializedReactDefaults(value, pathName, offenders) {

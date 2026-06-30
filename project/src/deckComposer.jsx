@@ -1,5 +1,7 @@
+// @ts-check
 import { DEFAULT_THEME_PACK, THEME_PACK_OPTIONS, slide } from './options.jsx';
 import { THEME_PAGES } from './components/themes/index.jsx';
+import { isMediaArrayKey } from './prop-contract-core.mjs';
 
 export const ROLE_KEYWORDS = {
   cover: ['cover', '封面', '首页'],
@@ -191,7 +193,7 @@ function countMediaItems(value) {
   return 0;
 }
 
-function layoutHasMediaSlot(layout, count = 1) {
+export function layoutHasMediaSlot(layout, count = 1) {
   const page = THEME_PAGE_BY_KEY.get(layout);
   return page ? pageHasMediaSlot(page, count) : false;
 }
@@ -200,9 +202,10 @@ function pageHasMediaSlot(page, count = 1) {
   return getMediaSlotCapacities(page).some(capacity => capacity >= Math.max(1, Number(count) || 1));
 }
 
+/** @param {import('./types').PageRecord} page */
 function getMediaSlotCapacities(page) {
   const props = page.defaultProps || {};
-  const controls = page.spec?.controls || [];
+  const controls = page.controls || [];
   const capacities = Object.keys(props)
     .filter(key => Array.isArray(props[key]) && isMediaArrayKey(key))
     .map(key => mediaArrayCapacity(key, props, controls));
@@ -247,9 +250,6 @@ function isMediaControl(control) {
   return /图片|图像|视频|媒体/.test(label) && !/^show/.test(key);
 }
 
-function isMediaArrayKey(key) {
-  return /^(images|media|photos|pictures|logos|thumbs|imageSlots|imgs)$/i.test(String(key || ''));
-}
 
 function getPageCount(spec) {
   const value = Number(spec.pageCount ?? spec.pages ?? spec.slideCount);

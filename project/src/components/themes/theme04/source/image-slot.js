@@ -49,6 +49,8 @@
 /* END USAGE */
 
 (() => {
+  if (typeof HTMLElement === 'undefined' || typeof customElements === 'undefined') return;
+
   const STATE_FILE = '.image-slots.state.json';
   const STORAGE_PREFIX = 'dashi-ppt-image-slots';
   // 2× a ~600px slot in a 1920-wide deck — retina-sharp without making the
@@ -141,6 +143,15 @@
 
   const S_MAX = 5;
   const clampS = (s) => Math.max(1, Math.min(S_MAX, s));
+
+  // Convention poster path: swap a file-path video extension for `.poster.jpg`.
+  // Returns null for data: URLs (no sidecar poster) so no broken poster loads.
+  function videoPoster(src) {
+    const s = String(src || '');
+    return /\.(mp4|m4v|mov|webm|ogv)(?:[?#].*)?$/i.test(s)
+      ? s.replace(/\.(mp4|m4v|mov|webm|ogv)(?:[?#].*)?$/i, '.poster.jpg')
+      : null;
+  }
 
   // Normalize a stored slot value. Pre-reframe sidecars stored a bare
   // data-URL string; newer ones store {u, s, x, y}. Either shape is valid.
@@ -271,15 +282,15 @@
       root.innerHTML =
         '<style>' + stylesheet + '</style>' +
         '<div class="frame" part="frame">' +
-        '  <img part="image" alt="" draggable="false" style="display:none">' +
-        '  <video part="video" muted playsinline loop autoplay preload="metadata" style="display:none"></video>' +
+        '  <img part="image" alt="" draggable="false" loading="lazy" decoding="async" style="display:none">' +
+        '  <video part="video" muted playsinline loop preload="none" style="display:none"></video>' +
         '  <div class="empty" part="empty">' + icon +
         '    <div class="cap"></div>' +
         '    <div class="sub">or <u>browse files</u></div></div>' +
         '  <div class="ring" part="ring"></div>' +
         '</div>' +
         '<div class="spill">' +
-        '  <img class="ghost" alt="" draggable="false">' +
+        '  <img class="ghost" alt="" draggable="false" loading="lazy" decoding="async">' +
         '  <div class="handle" data-c="nw"></div><div class="handle" data-c="ne"></div>' +
         '  <div class="handle" data-c="sw"></div><div class="handle" data-c="se"></div>' +
         '</div>' +
@@ -670,6 +681,9 @@
         if (kind === 'video') {
           this._exitReframe(false);
           if (this._video.getAttribute('src') !== url) this._video.src = url;
+          const poster = videoPoster(url);
+          if (poster) this._video.setAttribute('poster', poster);
+          else this._video.removeAttribute('poster');
           this._img.style.display = 'none';
           this._img.removeAttribute('src');
           this._ghost.removeAttribute('src');

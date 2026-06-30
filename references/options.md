@@ -46,9 +46,9 @@
 
 选页先使用 `npm run layout:query -- --theme <themePack> --role <role> --limit 8`。动态背景页用 `--role ambient`。需要图片槽时加 `--needs-media`、`--planned-images <n>`、`--provided-images <n>` 或 `--image-gen`,候选会基于真实 `mediaSlots`;用户给素材时只用 `canPresetMedia: true` 的槽,按 `presetProp` 写路径。
 
-长 deck 先用 `npm run goal:scaffold -- --title <title> --goal <goal> --theme <themePack> --pages <n> --chunk-size 5 --out output/<deck-name>/goal.json` 生成唯一 layout 骨架,再分段补 `props`。输出目录写在当前会话工作目录,不要写入 `<skill-root>/project/output`。
+长 deck 先用 `npm run goal:scaffold -- --title <title> --goal <goal> --theme <themePack> --pages <n> --chunk-size 5 --out output/<deck-name>/goal.json` 生成唯一 layout 骨架和 `goal.fill-plan.json`,再按 `fillPlan` 分段补 `props`。输出目录写在当前会话工作目录,不要写入 `<skill-root>/project/output`。
 
-单页契约优先使用 `npm run inspect:layout -- --compact <layout...>`,一次传多个 layout 或多次 `--layout`。`copyBudgets` 给出文案长度预算;`propShapes` 给出 `copy`、对象数组和嵌套数组的内部 key。写 `copy`、`cells`、`items`、`rows` 等对象字段时只使用 `propShapes` 列出的 key,不要凭字段名猜测。写数组、数量或图片时使用 `npm run props:safe -- <layout> '<props-json>' [--images <path...>]`;写完整 `goal.json` 后使用 `npm run props:safe -- --goal <goal-json> --write` 做整份 props 规范化。
+单页契约优先使用 `npm run inspect:layout -- --compact <layout...>`,一次传多个 layout 或多次 `--layout`。`fillPlan` 给出标题/正文长度、可见数组数量、嵌套数组数量和媒体写入字段;`propShapes` 给出 `copy`、对象数组和嵌套数组的内部 key。写 `copy`、`cells`、`items`、`rows` 等对象字段时只使用 `fillPlan` / `propShapes` 列出的 key,不要凭字段名猜测。写数组、数量或图片时使用 `npm run props:safe -- <layout> '<props-json>' [--images <path...>]`;写完整 `goal.json` 后使用 `npm run props:safe -- --goal <goal-json> --write` 做整份 props 规范化。
 
 图片/视频只写入页面 `props.images` / `props.media`。不要写 `slides[].media`;用户提供本地素材时先运行 `npm run media:stage -- <deck-output-dir-or-ppt-dir> <media-file...>`,再把返回的 `relative` 路径交给 `props:safe --images/--media` 或写入真实 media slot。每个素材最多使用一次。用户明确要求原创视觉图/生图时用 image-gen;未明确生图时先询问用户。需要 image-gen 生成 2 张以上独立图片时,用多个 subagent 并行,不要串行逐张等待;每张图独立生成,不要用一张拼图/素材板再拆分。subagent 只用于生图。用户只计划后续插图时选择并保留带 media slot 的页面。
 

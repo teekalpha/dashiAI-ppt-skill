@@ -18,6 +18,7 @@ export const RUNTIME_ASSET_PATHS = [
 
 export const GENERATED_RUNTIME_OUTPUT_ASSETS = [
   'assets/imported-theme-runtime.js',
+  'assets/deck-runtime.js',
 ];
 
 export const VENDOR_RUNTIME_OUTPUT_ASSETS = [

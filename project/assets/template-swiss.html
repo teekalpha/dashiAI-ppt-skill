@@ -50,6 +50,10 @@
   .slide[hidden]{display:none!important}
   .slide:not(.active){pointer-events:none}
   .slide.active{pointer-events:auto}
+  @media screen{
+    #deck>.slide{content-visibility:auto;contain-intrinsic-size:var(--deck-w) var(--deck-h)}
+    #deck>.slide.active,#deck>.slide.cv-near{content-visibility:visible}
+  }
   #hint,#nav{display:none!important}
   #nav .dot{width:6px;height:6px;padding:0;border:0;border-radius:999px;background:rgba(255,255,255,.32);cursor:pointer;transition:width .2s var(--ease-prod),background .2s var(--ease-prod)}
   #nav .dot.active{width:20px;background:var(--focus-mark)}
@@ -446,6 +450,7 @@
 <script id="deck-view-model" type="application/json">{}</script>
 <script id="embedded-text-state" type="application/json">{}</script>
 <script src="assets/imported-theme-runtime.js"></script>
+<script src="assets/deck-runtime.js"></script>
 <script>
 (function(){
 	  window.__pageTransitionModes = [
@@ -787,10 +792,41 @@
     };
   }
 
+  // URL 来源的文案是不可信输入(分享链接里的 deckState)。文案允许少量内联标签,
+  // 但必须剥离脚本/事件处理器/危险元素,否则 restore 时的 el.innerHTML = value 即 XSS。
+  // 用 <template> 解析(content 惰性,<img onerror>/<script> 不会执行),按白名单清洗。
+  var SANITIZE_ALLOWED_TAGS = {B:1,STRONG:1,I:1,EM:1,BR:1,SUP:1,SUB:1};
+  function sanitizeRichText(value){
+    if (typeof value !== 'string' || value.indexOf('<') === -1) return value;
+    var tpl = document.createElement('template');
+    tpl.innerHTML = value;
+    (function walk(node){
+      var children = Array.prototype.slice.call(node.childNodes);
+      for (var i=0;i<children.length;i++){
+        var child = children[i];
+        if (child.nodeType === 1){
+          walk(child);
+          if (SANITIZE_ALLOWED_TAGS[child.tagName]){
+            while (child.attributes.length) child.removeAttribute(child.attributes[0].name);
+          } else if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE') {
+            child.remove();
+          } else {
+            child.replaceWith.apply(child, Array.prototype.slice.call(child.childNodes));
+          }
+        } else if (child.nodeType !== 3) {
+          child.remove();
+        }
+      }
+    })(tpl.content);
+    return tpl.innerHTML;
+  }
+  if (typeof window !== 'undefined') window.__sanitizeRichText = sanitizeRichText;
+
   function sanitizeTextState(text){
     return Object.fromEntries(
       Object.entries(text || {})
-        .filter(([key, value]) => key && typeof value === 'string'),
+        .filter(([key, value]) => key && typeof value === 'string')
+        .map(([key, value]) => [key, sanitizeRichText(value)]),
     );
   }
 
@@ -1418,13 +1454,58 @@ function refreshSlideList(){
   syncDeckPageNumbers();
 }
 
-function ensureRuntimeSlideRendered(slide, values){
+function parseRuntimeSlidePage(layout){
+  const match = String(layout || '').match(/^(theme\d+)_page(\d+)$/i);
+  return match ? Number(match[2]) : null;
+}
+
+function getRuntimeSlideErrorMeta(slide){
+  const root = slide?.querySelector?.('.imported-theme-root');
+  const layout = slide?.dataset?.vmLayout || root?.dataset?.pageKey || '';
+  const index = Number(slide?.dataset?.vmIndex);
+  return {
+    theme: slide?.dataset?.themePack || root?.dataset?.themeKey || activeThemePack || document.documentElement.dataset.themePack || 'unknown',
+    page: parseRuntimeSlidePage(layout) ?? (Number.isFinite(index) ? index + 1 : null),
+    layout: layout || 'unknown',
+    dataLayout: slide?.dataset?.layout || '',
+    slideId: slide?.dataset?.vmSlideId || '',
+  };
+}
+
+function reportRuntimeSlideError(context, slide, error){
+  const meta = getRuntimeSlideErrorMeta(slide);
+  const message = error?.message || String(error || 'runtime render failed');
+  const detail = {...meta, context, message};
+  window.__deckRuntimeErrors = window.__deckRuntimeErrors || [];
+  window.__deckRuntimeErrors.push(detail);
+  console.error(`[${context}] theme=${meta.theme} page=${meta.page == null ? 'unknown' : String(meta.page).padStart(3, '0')} layout=${meta.layout} ${message}`, error);
+  dispatchEvent(new CustomEvent('deck-runtime-error', {detail}));
+}
+
+function renderRuntimeSlideWithIsolation(slide, props, opts={}){
+  if(!opts.isolated){
+    const rendered = !!window.__renderRuntimeSlide?.(slide, props);
+    delete slide.dataset.runtimeRenderError;
+    return rendered;
+  }
+  try{
+    const rendered = !!window.__renderRuntimeSlide?.(slide, props);
+    delete slide.dataset.runtimeRenderError;
+    return rendered;
+  }catch(error){
+    slide.dataset.runtimeRenderError = 'true';
+    reportRuntimeSlideError(opts.context || 'runtime isolated render', slide, error);
+    return false;
+  }
+}
+
+function ensureRuntimeSlideRendered(slide, values, opts={}){
   if(!slide) return false;
   const slideId = slide.dataset.vmSlideId;
   const sourceProps = window.__deckViewModel?.model?.slides?.find(item => item.id === slideId)?.props || {};
   const savedProps = window.__deckViewModel?.getState?.().props?.[slideId] || {};
   const next = {...sourceProps, ...savedProps, ...(values || {})};
-  const rendered = !!window.__renderRuntimeSlide?.(slide, next);
+  const rendered = renderRuntimeSlideWithIsolation(slide, next, opts);
   if(rendered){
     window.__initEditableText?.(slide);
     uniquifyDuplicatedRuntimeSlideSvgIds(slide);
@@ -1433,9 +1514,10 @@ function ensureRuntimeSlideRendered(slide, values){
 }
 window.__ensureRuntimeSlideRendered = ensureRuntimeSlideRendered;
 
-function prepareSlideForTransition(slide, values){
+function prepareSlideForTransition(slide, values, opts={}){
   if(!slide) return false;
-  const rendered = ensureRuntimeSlideRendered(slide, values);
+  const rendered = ensureRuntimeSlideRendered(slide, values, opts);
+  if(opts.isolated && slide.dataset.runtimeRenderError === 'true') return false;
   window.__restoreEffectIframes?.(slide);
   slide.dataset.transitionReady = 'true';
   return rendered || !!slide.firstElementChild;
@@ -1460,7 +1542,13 @@ function preloadAdjacentSlides(activeIndex=idx, opts={}){
     .map(index => slides[index])
     .filter(Boolean);
   if(!targets.length) return;
-  const run = () => targets.forEach(slide => prepareSlideForTransition(slide));
+  const run = () => {
+    applyAdjacentVisibility(activeIndex);
+    targets.forEach(slide => prepareSlideForTransition(slide, undefined, {
+      isolated:true,
+      context:'adjacent preload',
+    }));
+  };
   if(opts.immediate){
     run();
     return;
@@ -1478,6 +1566,16 @@ function preloadAdjacentSlides(activeIndex=idx, opts={}){
   else setTimeout(run, 60);
 }
 window.__preloadAdjacentSlides = preloadAdjacentSlides;
+
+// Keep the active slide's immediate neighbors painted (content-visibility:visible)
+// so adjacent navigation never flashes a blank/un-rendered frame.
+function applyAdjacentVisibility(activeIndex=idx){
+  const near = new Set();
+  [activeIndex - 1, activeIndex + 1].forEach(index => {
+    if(index >= 0 && index < slides.length && slides[index]) near.add(slides[index]);
+  });
+  allSlides.forEach(slide => slide.classList.toggle('cv-near', near.has(slide)));
+}
 
 function setActiveThemePack(themePack, opts={}){
   activeThemePack=themePack || '';
@@ -1740,7 +1838,10 @@ function syncVideoActivity(activeSlide=getActiveSlide()){
   slides.forEach(slide => {
     const active = slide === activeSlide && !document.hidden;
     slide.querySelectorAll('video').forEach(video => {
-      if(active) video.play?.().catch(() => {});
+      if(active){
+        if(video.readyState < 2) video.load?.();
+        video.play?.().catch(() => {});
+      }
       else video.pause?.();
     });
   });
@@ -1849,6 +1950,7 @@ function commitSlideIndex(nextIndex, opts={}){
     deck.style.transform='translateX(0px)';
     allSlides.forEach(slide => {
       slide.classList.remove('active');
+      slide.classList.remove('cv-near');
       slide.removeAttribute('data-deck-active');
     });
     syncNav();
@@ -1877,6 +1979,7 @@ function commitSlideIndex(nextIndex, opts={}){
     activeSlide.classList.add('active');
     activeSlide.setAttribute('data-deck-active', '');
   }
+  applyAdjacentVisibility(idx);
   syncNav();
   const el=slides[idx];
   ensureRuntimeSlideRendered(el);
@@ -2753,7 +2856,7 @@ function prewarmOverviewThumbCache(slide, runId){
       count:1,
     });
   }catch(error){
-    console.warn('[overview prewarm]', error);
+    reportRuntimeSlideError('overview prewarm', slide, error);
   }finally{
     if(slide !== slides[idx]) window.__releaseRuntimeSlide?.(slide);
   }
@@ -2806,7 +2909,7 @@ async function renderOverviewThumb(wrap, runId=overviewThumbRunId, opts={}){
     recordOverviewStage('dom-preview-thumbnail', previewStartAt, {slideId:getOverviewStableSlideId(slide)});
   } catch (error) {
     if(runId !== overviewThumbRunId || !isEditMode() || !wrap.isConnected) return;
-    console.warn('[overview thumb]', error);
+    reportRuntimeSlideError('overview thumb', slide, error);
     delete wrap.dataset.overviewRendered;
     wrap.dataset.overviewMode='placeholder';
     wrap.dataset.overviewError='true';
@@ -4771,15 +4874,13 @@ refreshRailCatalog();
 
   window.__exportDeckPdf = async function(){
     if(window.__deckExportLocked) return;
+    // Export is HTTP-service only. Opened directly from disk (file://) there is no
+    // export service, and a client-side export can't match server fidelity — so we
+    // tell the user to use the preview server instead of producing a lesser file.
+    if(!isExportServiceContext()) return showExportServiceRequired();
     let exportUi = null;
     let progressPoll = null;
     try {
-      if(location.protocol === 'file:'){
-        const message = 'PDF 直接下载需要通过本地 HTTPS 预览服务打开。请运行 npm run preview:start -- <输出 ppt 目录> <port>，再打开 https://jadon.local:<port>/ 后导出。';
-        window.__httpPreviewRequiredMessage = message;
-        alert(message);
-        return;
-      }
       exportUi = beginDeckExport('PDF');
       const progressId = createPdfExportProgressId();
       progressPoll = beginPdfExportProgressPolling(exportUi, progressId);
@@ -4789,24 +4890,32 @@ refreshRailCatalog();
       window.__syncDeckViewModelFromDom?.();
       throwIfDeckExportCancelled(exportUi);
       const slides = window.__getVisibleSlides?.() || [...document.querySelectorAll('#deck > .slide:not([hidden])')];
-      const response = await fetch('/api/export-pdf', {
-        method: 'POST',
-        headers: {'content-type': 'application/json'},
-        body: JSON.stringify({
-          title: document.title || 'Presentation',
-          fileName: getDeckFileName(),
-          sourcePath: location.pathname + location.search,
-          progressId,
-          snapshot: buildPdfExportSnapshot(),
-        }),
-      });
+      let response;
+      try {
+        response = await fetch('/api/export-pdf', {
+          method: 'POST',
+          headers: {'content-type': 'application/json'},
+          body: JSON.stringify({
+            title: document.title || 'Presentation',
+            fileName: getDeckFileName(),
+            sourcePath: location.pathname + location.search,
+            progressId,
+            snapshot: buildPdfExportSnapshot(),
+          }),
+        });
+      } catch {
+        response = null;
+      }
       progressPoll.stop();
       progressPoll = null;
       throwIfDeckExportCancelled(exportUi);
+      // No export service reachable (e.g. preview server without export support).
+      if(!response || response.status === 404){
+        throw new Error('导出需要 HTTP 服务模式：未连接到导出服务,请用 `npm run preview:start` 启动本地预览服务后再导出。');
+      }
       if(!response.ok){
         let detail = '';
         try { detail = (await response.json())?.error || ''; } catch {}
-        if(response.status === 404) detail = '当前页面没有 PDF 截图导出服务。请通过 npm run preview:start 启动本地预览后再导出。';
         throw new Error(detail || `PDF export endpoint failed (${response.status})`);
       }
       const result = await response.json();
@@ -4870,12 +4979,9 @@ refreshRailCatalog();
       alert(message);
       return;
     }
-    if(location.protocol === 'file:'){
-      const message = '可编辑 PPTX 导出需要通过本地 HTTP/HTTPS 预览服务打开。请运行 npm run preview:start -- <输出 ppt 目录> <port>，优先打开本机 HTTP 地址 http://127.0.0.1:<port>/ 或 http://localhost:<port>/ 后导出。http://jadon.local:<port>/ 这类 HTTP LAN/jadon.local 地址可能导致下载失败，不作为导出主入口；直接打开本地 HTML/file:// 不能导出可编辑 PPTX。';
-      window.__httpPreviewRequiredMessage = message;
-      alert(message);
-      return;
-    }
+    // Export is HTTP-service only (file:// has no editable-PPTX server, and a
+    // client-side export can't match server fidelity).
+    if(!isExportServiceContext()) return showExportServiceRequired();
     const button = document.getElementById('preview-export-pptx');
     const buttonLabel = button?.textContent;
     let exportUi = null;
@@ -4896,20 +5002,29 @@ refreshRailCatalog();
       const progressId = createEditablePptxProgressId();
       progressPoll = beginEditablePptxProgressPolling(exportUi, progressId);
       updateDeckExport(exportUi, 1, 100, '提交可编辑 PPTX 生成任务...');
-      const response = await fetch('/api/export-editable-pptx', {
-        method: 'POST',
-        headers: {'content-type': 'application/json'},
-        body: JSON.stringify({
-          title: document.title || 'Presentation',
-          fileName: getDeckFileName(),
-          sourcePath: location.pathname + location.search,
-          progressId,
-          snapshot: buildEditablePptxExportSnapshot(),
-        }),
-      });
+      let response;
+      try {
+        response = await fetch('/api/export-editable-pptx', {
+          method: 'POST',
+          headers: {'content-type': 'application/json'},
+          body: JSON.stringify({
+            title: document.title || 'Presentation',
+            fileName: getDeckFileName(),
+            sourcePath: location.pathname + location.search,
+            progressId,
+            snapshot: buildEditablePptxExportSnapshot(),
+          }),
+        });
+      } catch {
+        response = null;
+      }
       progressPoll.stop();
       progressPoll = null;
       throwIfDeckExportCancelled(exportUi);
+      // No export service reachable.
+      if(!response || response.status === 404){
+        throw new Error('导出需要 HTTP 服务模式：未连接到导出服务,请用 `npm run preview:start` 启动本地预览服务后再导出。');
+      }
       if(!response.ok){
         let detail = '';
         try { detail = (await response.json())?.error || ''; } catch {}
@@ -5710,6 +5825,16 @@ refreshRailCatalog();
       .trim() || 'presentation';
   }
 
+  // Export is HTTP-service only. Tell the user to use the preview server instead of
+  // producing a lower-fidelity client-side file. Opening the deck from disk
+  // (location.protocol === 'file:') cannot export editable PPTX.
+  function isExportServiceContext(){
+    return location.protocol === 'http:' || location.protocol === 'https:';
+  }
+  function showExportServiceRequired(){
+    alert('仅支持 HTTP 服务模式下导出。\n\n直接打开本地 HTML(file://)不能导出可编辑 PPTX。请用 `npm run preview:start -- <输出 ppt 目录> <port>` 启动本地预览服务,再用 http://127.0.0.1:<port>/ 打开并导出 PDF / PPTX。');
+  }
+
   staticUnicornRuntime();
 })();
 
@@ -5764,9 +5889,12 @@ refreshRailCatalog();
     });
 
     function claimTextId(el, preferredId){
-      let id = preferredId || nextTextId(el);
+      const base = preferredId || nextTextId(el);
+      let id = base;
+      let suffix = 0;
       while(claimedTextIds.has(id)){
-        id = nextTextId(el);
+        suffix += 1;
+        id = `${base}-${suffix}`;
       }
       claimedTextIds.add(id);
       return id;
@@ -5950,12 +6078,20 @@ refreshRailCatalog();
     window.__deckViewModel?.setTextState?.(textState);
   }
 
+  // JAD-173:没有显式 data-editable-path 时,用「从 slide 根到元素的 child-index 路径」生成稳定 ID,
+  // 而非按 querySelectorAll 遍历顺序递增计数器。计数器在 prop 变更 reflow(候选元素集合变化)时整体
+  // 漂移,使已存文案套到错误元素;结构路径只随该元素自身祖先结构变化,跨无关 reflow 稳定。
   function nextTextId(el){
     const slide = el.closest('.slide');
     const slideKey = getTextSlideKey(slide);
-    const count = (textCounters.get(slideKey) || 0) + 1;
-    textCounters.set(slideKey, count);
-    return `text:${slideKey}:${count}`;
+    const segments = [];
+    let node = el;
+    while(node && node !== slide && node.parentElement){
+      segments.push([...node.parentElement.children].indexOf(node));
+      node = node.parentElement;
+    }
+    segments.reverse();
+    return `text:${slideKey}:p${segments.join('-')}`;
   }
 
   function explicitTextId(el){

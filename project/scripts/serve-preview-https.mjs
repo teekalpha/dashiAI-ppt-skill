@@ -9,6 +9,8 @@ import tls from 'node:tls';
 import { getChromeExecutablePath } from './chrome-path.mjs';
 import { getOpenSslExecutablePath } from './openssl-path.mjs';
 import { ensureThemePreviewFresh } from './preview-freshness.mjs';
+import { safePathname } from './preview-path.mjs';
+import { isExportRequestAllowed, isLoopbackHost } from './preview-export-auth.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const SERVE_ROOT = path.resolve(ROOT, process.argv[2] || 'output/theme-preview/ppt');
@@ -32,7 +34,7 @@ if (!existsSync(path.join(SERVE_ROOT, 'index.html'))) {
 
 ensureCertificate();
 
-const requestHandler = async (req, res) => {
+const serveRequest = async (req, res) => {
   const requestUrl = new URL(req.url || '/', 'https://local.invalid');
   if (req.method === 'POST' && requestUrl.pathname === '/api/export-editable-pptx') {
     await handleEditablePptxExport(req, res);
@@ -60,6 +62,11 @@ const requestHandler = async (req, res) => {
   }
 
   const pathname = safePathname(req.url || '/');
+  if (pathname === null) {
+    res.writeHead(400, { 'content-type': 'text/plain;charset=utf-8' });
+    res.end('Bad request');
+    return;
+  }
   const requested = path.join(SERVE_ROOT, pathname === '/' ? 'index.html' : pathname);
   const file = resolveFile(requested);
 
@@ -76,6 +83,21 @@ const requestHandler = async (req, res) => {
   createReadStream(file).pipe(res);
 };
 
+// 顶层兜底:任何处理异常都不得让进程崩溃(请求监听器是 async,未捕获即 unhandledRejection)。
+const requestHandler = async (req, res) => {
+  try {
+    await serveRequest(req, res);
+  } catch (error) {
+    console.error('[preview] request failed:', error?.message || error);
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+    res.writeHead(400, { 'content-type': 'text/plain;charset=utf-8' });
+    res.end('Bad request');
+  }
+};
+
 const httpServer = http.createServer(requestHandler);
 const secureContext = tls.createSecureContext({
   key: readFileSync(CERT_KEY),
@@ -89,6 +111,9 @@ server.listen(PORT, HOST, () => {
   const urls = [httpPrimary, httpsPrimary, ...LAN_IPS.flatMap((ip) => [`http://${ip}:${PORT}/`, `https://${ip}:${PORT}/`])];
   console.log(`HTTP/HTTPS preview serving ${SERVE_ROOT}`);
   console.log(`Open: ${urls.join(' or ')}`);
+  if (!isLoopbackHost(HOST)) {
+    console.warn(`[preview] 警告:绑定在 ${HOST}(非回环),预览/导出对局域网可达。导出端点要求请求带允许的 Origin。`);
+  }
 });
 
 function createHttpHttpsMuxServer(plainServer, context) {
@@ -180,12 +205,6 @@ ${altNames.join('\n')}
 `;
 }
 
-function safePathname(url) {
-  const parsed = new URL(url, 'https://local.invalid');
-  const decoded = decodeURIComponent(parsed.pathname);
-  return decoded.split('/').filter((part) => part && part !== '..').join('/');
-}
-
 function resolveFile(file) {
   const resolved = path.resolve(file);
   if (!resolved.startsWith(SERVE_ROOT + path.sep) && resolved !== SERVE_ROOT) return null;
@@ -229,7 +248,7 @@ async function handleEditablePptxExport(req, res) {
     updateExportProgress(progressId, { stage: 'queued', detail: '服务端接收导出请求', percent: 4 });
     const [{ chromium }, { exportEditablePptxFromUrl }] = await Promise.all([
       import('playwright-core'),
-      import('../src/export-pptx/editable.mjs'),
+      import('../packages/html-deck-to-pptx/src/editable.mjs'),
     ]);
     updateExportProgress(progressId, { stage: 'launching', detail: '启动导出浏览器', percent: 6 });
     const browser = await chromium.launch({ headless: true, executablePath: getChromePath() });
@@ -284,7 +303,7 @@ async function handlePdfExport(req, res) {
     updateExportProgress(progressId, { stage: 'queued', detail: '服务端接收 PDF 导出请求', percent: 4 });
     const [{ chromium }, { exportScreenshotPdfFromUrl }] = await Promise.all([
       import('playwright-core'),
-      import('../src/export-pdf/screenshot.mjs'),
+      import('../packages/html-deck-to-pptx/src/screenshot.mjs'),
     ]);
     updateExportProgress(progressId, { stage: 'launching', detail: '启动截图浏览器', percent: 6 });
     const browser = await chromium.launch({ headless: true, executablePath: getChromePath() });
@@ -444,14 +463,12 @@ function encodeRFC5987(value) {
 }
 
 function isAllowedExportRequest(req) {
-  const origin = req.headers.origin;
-  if (!origin) return true;
   const allowedHosts = ['localhost', '127.0.0.1', `${LOCAL_HOSTNAME}.local`, ...LAN_IPS];
   const allowed = new Set(allowedHosts.flatMap(host => [
     `http://${host}:${PORT}`,
     `https://${host}:${PORT}`,
   ]));
-  return allowed.has(origin);
+  return isExportRequestAllowed({ origin: req.headers.origin, host: HOST, allowedOrigins: allowed });
 }
 
 function readJsonBody(req) {

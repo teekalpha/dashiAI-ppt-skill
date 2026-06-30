@@ -111,7 +111,7 @@ function runGoal(goalArg, options = {}) {
     };
   });
   const normalizedSpec = Array.isArray(spec.slides) ? { ...spec, slides: normalizedSlides } : spec;
-  const goalSpecErrors = validateGoalSpec(normalizedSpec);
+  const goalSpecErrors = validateGoalSpec(normalizedSpec, { authoredSpec: spec });
   const propErrors = slideResults.flatMap(item => (item.errors || []).map(error => `slide ${item.slide} ${item.layout || '<missing>'}: ${error}`));
   const ok = goalSpecErrors.length === 0 && propErrors.length === 0;
   if (ok && options.write) writeFileSync(goalArg, compactJson(normalizedSpec));

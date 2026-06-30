@@ -384,10 +384,28 @@ if (/theme06_page048/.test(goSource)) {
   errors.push('Page transition skip still targets theme06_page048; JAD-94 scope is theme05_page048.');
 }
 
+// JAD-94 invariant: theme05 PulseMeter disables its own internal motion (not just
+// the global page transition). The check reads the component source in the dev repo;
+// in an installed skill (JAD-203) the readable source is stripped and the invariant
+// is baked into the prebuilt theme05 runtime bundle, so fall back to that. Only if
+// neither source nor a prebuilt bundle exists do we skip (never scan the deck HTML,
+// which would false-fail every installed-rendered deck).
 const pulseMeterFile = 'src/components/themes/theme05/source/components/esm/PulseMeter.jsx';
-const pulseMeterSource = existsSync(pulseMeterFile) ? readFileSync(pulseMeterFile, 'utf8') : html;
-if (!/pulse-meter--no-motion/.test(pulseMeterSource) || !/pulse-meter--no-motion[\s\S]{0,500}transition:\s*none\s*!important/.test(pulseMeterSource) || !/pulse-meter--no-motion[\s\S]{0,500}animation:\s*none\s*!important/.test(pulseMeterSource)) {
-  errors.push('theme05 page 48 must disable its internal component motion, not only the global page transition.');
+const pulseMeterPrebuilt = [
+  'dist/theme-runtime/theme05.module.mjs',
+  'project/dist/theme-runtime/theme05.module.mjs',
+].find(p => existsSync(p));
+let pulseMeterSource = null;
+if (existsSync(pulseMeterFile)) pulseMeterSource = readFileSync(pulseMeterFile, 'utf8');
+else if (pulseMeterPrebuilt) pulseMeterSource = readFileSync(pulseMeterPrebuilt, 'utf8');
+if (pulseMeterSource !== null) {
+  // Tolerate minified CSS (optional whitespace around ':' and combined selectors).
+  const noMotion = /pulse-meter--no-motion/.test(pulseMeterSource);
+  const noTransition = /pulse-meter--no-motion[\s\S]{0,500}transition\s*:\s*none\s*!important/.test(pulseMeterSource);
+  const noAnimation = /pulse-meter--no-motion[\s\S]{0,500}animation\s*:\s*none\s*!important/.test(pulseMeterSource);
+  if (!noMotion || !noTransition || !noAnimation) {
+    errors.push('theme05 page 48 must disable its internal component motion, not only the global page transition.');
+  }
 }
 
 const transitionRuntimeStart = html.indexOf('window.__playPageTransition = function');

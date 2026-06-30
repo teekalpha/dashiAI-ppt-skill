@@ -11,40 +11,18 @@ import {
   serializeValue,
 } from '../../prop-contract-core.mjs';
 import { GENERATED_THEME_PAGES, GENERATED_THEME_PACKS } from './generated-metadata.js';
-import { ICONS as THEME03_DECOR_ICONS } from './theme03/source/src/icons.js';
-import { PRESET_3D as THEME03_PRESET_3D } from './theme03/source/src/preset3d.js';
+import { overrides as theme02Overrides } from './theme02/overrides.js';
+import { overrides as theme03Overrides } from './theme03/overrides.js';
+import { overrides as theme04Overrides } from './theme04/overrides.js';
 
-const THEME03_GLOBAL_ACCENT_CONTROL = {
-  key: 'accent',
-  label: '强调色',
-  type: 'select',
-  default: 'blue',
-  options: [
-    { value: 'blue', label: '电光蓝' },
-    { value: 'lime', label: '荧光绿' },
-  ],
-};
-
-const THEME03_DECOR_CONTROLS = [
-  { key: 'showDecor', label: '装饰图片', type: 'toggle', default: false },
-  {
-    key: 'decorSrc',
-    label: '装饰元素',
-    type: 'icons',
-    default: null,
-    options: THEME03_DECOR_ICONS.map(({ src, label }) => ({ value: src, label, image: src })),
-  },
-  { key: 'decorScale', label: '图片大小', type: 'range', default: 1, min: 0.6, max: 1.6, step: 0.05 },
-];
-
-const THEME03_DECOR_DEFAULTS = {
-  showDecor: false,
-  decorSrc: null,
-  decorScale: 1,
+// JAD-182:per-theme 控件特例集中到各 themeNN/overrides.js,index.jsx 通用消费(不造框架)。
+const THEME_OVERRIDES = {
+  theme02: theme02Overrides,
+  theme03: theme03Overrides,
+  theme04: theme04Overrides,
 };
 
 const REMOVED_CONTROL_TYPES = new Set(['text', 'string', 'input', 'url', 'email', 'textarea', 'multiline']);
-const THEME04_REMOVED_CONTROL_TYPES = new Set(['text', 'string', 'input', 'url', 'email', 'textarea', 'multiline', 'list', 'array', 'object', 'section']);
 
 export const THEME_PAGES = GENERATED_THEME_PAGES.map(applyThemePageDefaults);
 export const THEME_PACK_OPTIONS = Object.fromEntries(
@@ -63,28 +41,32 @@ export const THEME_PACK_OPTIONS = Object.fromEntries(
 const PAGES_BY_KEY = new Map(THEME_PAGES.map(page => [page.key, page]));
 
 function applyThemePageDefaults(page) {
-  if (page.themeKey === 'theme04') {
-    return {
-      ...page,
-      controls: (page.controls || []).filter(control => !THEME04_REMOVED_CONTROL_TYPES.has(String(control?.type || '').toLowerCase())),
+  const override = THEME_OVERRIDES[page.themeKey];
+  if (!override) return page;
+  let next = page;
+  if (override.removeControlTypes) {
+    const removed = new Set(override.removeControlTypes);
+    next = {
+      ...next,
+      controls: (next.controls || []).filter(control => !removed.has(String(control?.type || '').toLowerCase())),
     };
   }
-  if (page.themeKey !== 'theme03') return page;
-  const theme03InjectedKeys = new Set(['accent', 'theme', 'showDecor', 'decorSrc', 'decorScale']);
-  return {
-    ...page,
-    controls: [
-      ...(page.controls || []).filter(control => !theme03InjectedKeys.has(control.key)),
-      ...THEME03_DECOR_CONTROLS,
-      THEME03_GLOBAL_ACCENT_CONTROL,
-    ],
-    defaultProps: {
-      ...(page.defaultProps || {}),
-      ...THEME03_DECOR_DEFAULTS,
-      accent: 'blue',
-      ...(THEME03_PRESET_3D[page.slot] || {}),
-    },
-  };
+  if (override.injectControls) {
+    const replaced = new Set(override.replaceKeys || []);
+    next = {
+      ...next,
+      controls: [
+        ...(next.controls || []).filter(control => !replaced.has(control.key)),
+        ...override.injectControls,
+      ],
+      defaultProps: {
+        ...(next.defaultProps || {}),
+        ...(override.injectDefaults || {}),
+        ...(override.preset3dBySlot?.[page.slot] || {}),
+      },
+    };
+  }
+  return next;
 }
 
 export function makeImportedThemePage(layoutKey) {
@@ -163,9 +145,7 @@ function normalizeControls(controls, defaults, page) {
 }
 
 function isThemeSwatchControl(page, key) {
-  return (page?.themeKey === 'theme02' && key === 'scheme')
-    || (page?.themeKey === 'theme03' && key === 'accent')
-    || (page?.themeKey === 'theme04' && key === 'accentTone');
+  return (THEME_OVERRIDES[page?.themeKey]?.swatchKeys || []).includes(key);
 }
 
 function normalizeType(type) {

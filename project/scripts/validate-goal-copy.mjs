@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
+import { isMediaArrayKey } from '../src/prop-contract-core.mjs';
 
 const [, , specArg, htmlArg] = process.argv;
 
@@ -40,6 +41,7 @@ const COUNT_ARRAY_CANDIDATES = {
   seriesCount: ['series'],
   segmentCount: ['segments'],
 };
+const NEUTRAL_PLACEHOLDERS = ['请输入文本', '请输入', '请输'];
 const visibleText = extractSlideText(html);
 const COMMON_TERMS = new Set([
   '一个',
@@ -161,8 +163,8 @@ function pickRequestedTerms(spec) {
   return [...terms].filter(term => !COMMON_TERMS.has(term)).slice(0, 12);
 }
 
-function extractSlideText(html) {
-  return `${extractRenderedSlideText(html)}\n${extractVisibleDeckPropsText(html)}`;
+function extractSlideText(html, renderedText = extractRenderedSlideText(html)) {
+  return `${renderedText}\n${extractVisibleDeckPropsText(html)}`;
 }
 
 function extractRenderedSlideText(html) {
@@ -177,20 +179,20 @@ function extractVisibleDeckPropsText(markup) {
   const sections = getSlideSections(markup);
   return JSON.stringify(model.slides.map(slide => ({
     layout: slide.layout,
-    props: visiblePropsForSlide(slide, readPropControls(sections.get(slide.id) || '')),
+    props: visiblePropsForSlide(slide, readPropControls(sections.get(slide.id) || ''), readArrayMeta(slide)),
   })));
 }
 
-function visiblePropsForSlide(slide, controls = []) {
+function visiblePropsForSlide(slide, controls = [], arrayMeta = []) {
   const props = slide?.props || {};
-  const bindings = getCountBindings(slide, controls);
+  const bindings = getCountBindings(slide, controls, arrayMeta);
   const arrayCounts = new Map();
   for (const binding of bindings) {
     const count = numberOrNull(props[binding.key] ?? props[binding.publicKey]);
     if (count == null) continue;
     for (const arrayKey of binding.arrays || []) arrayCounts.set(arrayKey, count);
   }
-  const fallbackCount = fallbackVisibleCount(props, bindings);
+  const fallbackCount = fallbackVisibleCount(props, bindings, controls);
   return filterVisibleValue(props, '', arrayCounts, fallbackCount);
 }
 
@@ -217,22 +219,50 @@ function lastPathKey(pathName) {
     ?.replace(/\[\]$/, '') || '';
 }
 
-function fallbackVisibleCount(props, bindings) {
-  const counts = [...new Set((bindings || [])
-    .map(binding => numberOrNull(props[binding.key] ?? props[binding.publicKey]))
+function fallbackVisibleCount(props, bindings, controls = []) {
+  const countKeys = new Set();
+  for (const binding of bindings || []) {
+    if (binding.key) countKeys.add(binding.key);
+    if (binding.publicKey) countKeys.add(binding.publicKey);
+  }
+  for (const control of controls || []) {
+    if (!isNonMediaCountControl(control)) continue;
+    if (control.key) countKeys.add(control.key);
+    if (control.publicKey) countKeys.add(control.publicKey);
+  }
+  const counts = [...new Set([...countKeys]
+    .map(key => numberOrNull(props[key]))
     .filter(value => value != null))];
   return counts.length === 1 ? counts[0] : null;
+}
+
+function isNonMediaCountControl(control) {
+  const key = String(control?.key || control?.publicKey || '');
+  const type = String(control?.type || '').toLowerCase();
+  if (!/count$/i.test(key)) return false;
+  if (type && !['number', 'range', 'slider'].includes(type)) return false;
+  return !/(?:image|img|media|photo|video|avatar|logo|thumb|cover|poster|slot)/i.test(key);
 }
 
 function shouldSliceByFallback(key, value, fallbackCount) {
   if (fallbackCount == null || !Array.isArray(value) || value.length <= fallbackCount) return false;
   if (isMediaArrayKey(key)) return false;
-  return /^(items|cards|stats|data|captions|labels|callouts|features|tiles)$/i.test(String(key || ''));
+  if (/^(items|cards|stats|data|captions|labels|callouts|features|tiles)$/i.test(String(key || ''))) return true;
+  // The count→array binding table does not name every component's content array (e.g. nodes, tiers,
+  // premises, shots). When a single page count resolves below the array length and the count-hidden
+  // tail is neutral-placeholder filler padded for panel restore, slice it off so it is not scanned
+  // as visible copy. Arrays whose tail is genuine copy stay intact, so real residue is still caught.
+  return value.slice(fallbackCount).some(containsNeutralPlaceholder);
 }
 
-function isMediaArrayKey(key) {
-  return /^(images|media|photos|pictures|logos|thumbs|imageSlots|imgs)$/i.test(String(key || ''));
+function containsNeutralPlaceholder(item) {
+  if (item == null) return false;
+  if (typeof item === 'string') return NEUTRAL_PLACEHOLDERS.some(placeholder => item.includes(placeholder));
+  if (typeof item !== 'object') return false;
+  const text = JSON.stringify(item);
+  return NEUTRAL_PLACEHOLDERS.some(placeholder => text.includes(placeholder));
 }
+
 
 function numberOrNull(value) {
   const number = Number(value);
@@ -241,7 +271,12 @@ function numberOrNull(value) {
 
 function findNeutralPlaceholders(text) {
   const hits = new Set();
-  if (String(text || '').includes('请输入文本')) hits.add('请输入文本');
+  let value = String(text || '');
+  for (const placeholder of NEUTRAL_PLACEHOLDERS) {
+    if (!value.includes(placeholder)) continue;
+    hits.add(placeholder);
+    value = value.replaceAll(placeholder, '');
+  }
   return [...hits];
 }
 
@@ -273,7 +308,7 @@ function validateCountControls(html, errors) {
     const section = sections.get(slide.id);
     if (!section) continue;
     const controls = readPropControls(section);
-    for (const control of getCountBindings(slide, controls)) {
+    for (const control of getCountBindings(slide, controls, readArrayMeta(slide))) {
       const key = control.key;
       const candidates = control.arrays || COUNT_ARRAY_CANDIDATES[key];
       if (!candidates?.length) continue;
@@ -303,23 +338,70 @@ function readLayoutManifest() {
   }
 }
 
-function getCountBindings(slide, controls = []) {
+function getCountBindings(slide, controls = [], arrayMeta = []) {
   const manifestBindings = layoutManifest?.layouts?.[slide.layout]?.countBindings;
+  const metaBindings = arrayMetaCountBindings([
+    ...(layoutManifest?.layouts?.[slide.layout]?.arrayMeta || []),
+    ...(arrayMeta || []),
+  ]);
+  const explicitControlBindings = controlCountBindings(controls);
   const fallbackBindings = controls
     .filter(control => COUNT_ARRAY_CANDIDATES[control.key])
     .map(control => ({ ...control, arrays: COUNT_ARRAY_CANDIDATES[control.key] }));
-  return mergeCountBindings(manifestBindings, fallbackBindings);
+  return mergeCountBindings(manifestBindings, metaBindings, explicitControlBindings, fallbackBindings);
 }
 
-function mergeCountBindings(primary = [], fallback = []) {
+function arrayMetaCountBindings(arrayMeta = []) {
+  return (arrayMeta || [])
+    .filter(meta => meta?.key && (meta.countKey || meta.publicCountKey))
+    .map(meta => ({
+      key: meta.countKey || meta.publicCountKey,
+      publicKey: meta.publicCountKey || meta.countKey,
+      arrays: [meta.key],
+      min: meta.min,
+      max: meta.max,
+    }));
+}
+
+function controlCountBindings(controls = []) {
+  const bindings = [];
+  for (const control of controls || []) {
+    const arrays = normalizeCountArrays(control.countArrays);
+    if (arrays.length && control.key) {
+      bindings.push({ ...control, arrays });
+    }
+    if (control.countKey && control.key && !isMediaArrayKey(control.key)) {
+      bindings.push({
+        key: control.countKey,
+        publicKey: control.countKey,
+        arrays: [control.key],
+        min: control.min,
+        max: control.max,
+      });
+    }
+  }
+  return bindings;
+}
+
+function normalizeCountArrays(value) {
+  if (Array.isArray(value)) return value.filter(item => typeof item === 'string' && item);
+  if (typeof value === 'string') return value.split(',').map(item => item.trim()).filter(Boolean);
+  return [];
+}
+
+function mergeCountBindings(...groups) {
   const result = [];
   const seen = new Set();
-  for (const binding of [...(primary || []), ...(fallback || [])]) {
+  for (const binding of groups.flatMap(group => group || [])) {
     if (!binding?.key || seen.has(binding.key)) continue;
     seen.add(binding.key);
     result.push(binding);
   }
   return result;
+}
+
+function readArrayMeta(slide) {
+  return Array.isArray(slide?.arrayMeta) ? slide.arrayMeta : [];
 }
 
 function deriveCount(props, key, candidates) {

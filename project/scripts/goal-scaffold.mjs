@@ -4,6 +4,8 @@ import path from 'node:path';
 import {
   compactJson,
   isCoverCandidate,
+  isCoverLikeLayout,
+  inspectLayout,
   listLayouts,
   parseArgs,
 } from './skill-workflow-utils.mjs';
@@ -65,9 +67,11 @@ function run() {
   if (errors.length) throw new Error(`Scaffold failed goal spec validation:\n- ${errors.join('\n- ')}`);
 
   writeJson(out, spec);
+  const fillPlanOut = writeFillPlan(out, spec);
   writeChunks(out, spec, chunkSize);
   process.stdout.write(compactJson({
     out: path.resolve(out),
+    fillPlanOut,
     themePack,
     pageCount,
     slideCount: slides.length,
@@ -102,7 +106,7 @@ function pickLayout({ themePack, role, used, body }) {
       return true;
     })
     .filter(layout => !used.has(layout))
-    .filter(layout => !body || !isCoverCandidate(layout));
+    .filter(layout => !body || (!isCoverCandidate(layout) && !isCoverLikeLayout(layout)));
   const layout = candidates[0];
   if (!layout) throw new Error(`No unused ${body ? 'body' : 'cover'} layout available for role "${role}" in ${themePack}`);
   return layout;
@@ -125,7 +129,8 @@ function writeChunks(out, spec, chunkSize) {
   for (let index = 0; index < total; index += 1) {
     const start = index * size;
     const end = Math.min(spec.slides.length, start + size);
-    writeJson(path.join(parsed.dir, `${parsed.name}.part-${String(index + 1).padStart(2, '0')}.json`), {
+    const chunkPath = path.join(parsed.dir, `${parsed.name}.part-${String(index + 1).padStart(2, '0')}.json`);
+    const chunkSpec = {
       title: spec.title,
       goal: spec.goal,
       themePack: spec.themePack,
@@ -137,13 +142,41 @@ function writeChunks(out, spec, chunkSize) {
         endSlide: end,
       },
       slides: spec.slides.slice(start, end),
-    });
+    };
+    writeJson(chunkPath, chunkSpec);
+    writeFillPlan(chunkPath, chunkSpec);
   }
 }
 
 function writeJson(file, value) {
   mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
   writeFileSync(file, compactJson(value));
+}
+
+function writeFillPlan(goalPath, spec) {
+  const out = fillPlanPath(goalPath);
+  writeJson(out, {
+    goal: path.resolve(goalPath),
+    themePack: spec.themePack,
+    slideCount: spec.slides.length,
+    ...(spec.part ? { part: spec.part } : {}),
+    slides: spec.slides.map((slide, index) => {
+      const inspected = inspectLayout(slide.layout, { compact: true });
+      return {
+        slide: (spec.part?.startSlide || 1) + index,
+        layout: slide.layout,
+        label: inspected?.label || null,
+        roles: inspected?.roles || [],
+        fillPlan: inspected?.fillPlan || null,
+      };
+    }),
+  });
+  return path.resolve(out);
+}
+
+function fillPlanPath(goalPath) {
+  const parsed = path.parse(goalPath);
+  return path.join(parsed.dir, `${parsed.name}.fill-plan.json`);
 }
 
 function printUsage() {
