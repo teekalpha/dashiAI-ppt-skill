@@ -37,7 +37,10 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 export const THEME_PACKS = filterAcceptedThemePacks(GENERATED_THEME_PACKS);
 export const THEME_PAGES = filterAcceptedThemePages(GENERATED_THEME_PAGES);
 
-const ROLE_KEYWORDS = {
+export const ROLE_KEYWORDS = {
+  // 模糊意图词(批测高频):宽命中到所有数据/汇报类版式。
+  data: ['metric', 'stat', 'number', 'chart', 'trend', 'curve', 'rank', 'waterfall', 'donut', 'heatmap', 'matrix', 'funnel', 'monthly', 'deal', 'ticket', '指标', '数据', '图表', '排行', '走势', '占比'],
+  report: ['market', 'context', 'industry', 'metric', 'stat', 'overview', 'summary', 'monthly', 'outlook', '全景', '背景', '行业', '指标', '汇报', '总览', '展望'],
   cover: ['cover', '封面', '首页'],
   statement: ['statement', 'summary', 'overview', 'manifesto', 'quote', '摘要', '主张', '观点', '结论'],
   breakdown: ['contents', 'agenda', 'index', 'directory', '目录', '结构', '纲目'],
@@ -65,6 +68,14 @@ const ROLE_ALIASES = {
   summary: 'statement',
   insight: 'observation',
   quote: 'observation',
+  // 批测实证的直觉词(codex 多轮使用未命中):映射到最接近的既有 role。
+  numbers: 'metrics',
+  section: 'transition',
+  chapter: 'transition',
+  list: 'breakdown',
+  product: 'case',
+  feature: 'case',
+  faq: 'risks',
   content: 'content',
   body: 'content',
   main: 'content',
@@ -75,7 +86,6 @@ const ROLE_ALIASES = {
   '主体': 'content',
   '内页': 'content',
   chart: 'metrics',
-  data: 'metrics',
   timeline: 'trend',
   compare: 'comparison',
   flow: 'process',

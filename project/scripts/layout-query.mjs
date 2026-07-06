@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import {
+  ROLE_KEYWORDS,
   compactJson,
   getThemePackMetadata,
   listLayouts,
@@ -47,6 +48,13 @@ process.stdout.write(compactJson({
   themeAudience: themeMetadata?.audience || null,
   count: layouts.length,
   layouts,
+  // 零结果时给可行动提示:列出可用 role,避免调用方退化为全量翻页。
+  ...(layouts.length === 0 ? {
+    hint: result.role
+      ? `role "${result.role}" 在该条件下无候选;可用 role 见 availableRoles,或去掉 --role 用 --keyword 搜索`
+      : '无候选;试试更换 --keyword 或去掉媒体条件',
+    availableRoles: Object.keys(ROLE_KEYWORDS),
+  } : {}),
 }));
 
 function themeDisplayName(theme, fallback) {

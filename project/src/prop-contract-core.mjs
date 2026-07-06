@@ -862,7 +862,7 @@ function inferredNumberSemantics(key, values) {
 export function validateNumberBounds(value, bounds, field, target) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return;
   const range = `[${formatNumber(bounds.min)}, ${formatNumber(bounds.max)}]`;
-  const suffix = bounds.explicit ? '' : ' (inferred from default sample data; not a hard limit, real authored data may exceed it)';
+  const suffix = bounds.explicit ? '' : ' (inferred from default sample data; NOT a hard limit — keep real authored values as-is, do not scale them down to fit)';
   if (value < bounds.min) target.push(`${field}: expected >= ${formatNumber(bounds.min)}; allowed range ${range}${suffix}`);
   if (value > bounds.max) target.push(`${field}: expected <= ${formatNumber(bounds.max)}; allowed range ${range}${suffix}`);
 }
